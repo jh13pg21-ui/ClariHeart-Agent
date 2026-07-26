@@ -105,4 +105,3 @@ class MigrationWorkflowTests(unittest.TestCase):
             orm_foreign_keys = {foreign_key.target_fullname for foreign_key in Base.metadata.tables[name].foreign_keys}
             database_foreign_keys = {foreign_key["referred_table"] + "." + foreign_key["referred_columns"][0] for foreign_key in inspector.get_foreign_keys(name)}
             self.assertEqual(database_foreign_keys, orm_foreign_keys)
-

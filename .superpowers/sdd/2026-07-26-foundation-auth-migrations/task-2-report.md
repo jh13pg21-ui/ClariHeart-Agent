@@ -30,7 +30,7 @@
 ```text
 python -m unittest tests.test_migrations -v  => Ran 6 tests ... OK
 python -m unittest discover -s tests         => Ran 25 tests ... OK
-git diff --check                              => exit 0
+git diff --check 3a3e283..HEAD                => exit 0（空白修复提交后复核）
 ```
 
 完整测试输出仅含项目既有的 `datetime.utcnow` 与 FastAPI `on_event` 弃用警告，无测试失败。
