@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 from alembic import command
@@ -14,7 +15,6 @@ from app.core.config import get_settings
 
 
 BASELINE_REVISION = "0001_existing_schema_baseline"
-HEAD_REVISION = "0002_auth_audit_outbox_schema"
 LEGACY_COLUMNS = {
     "user_accounts": {"id", "username", "display_name", "password_hash", "roles_csv", "created_at"},
     "chat_sessions": {"id", "public_id", "title", "user_id", "created_at", "updated_at"},
@@ -51,9 +51,30 @@ def legacy_schema_matches(database_url: str) -> bool:
         tables = set(inspector.get_table_names())
         if tables != set(LEGACY_COLUMNS):
             return False
-        return all({column["name"] for column in inspector.get_columns(name)} == columns for name, columns in LEGACY_COLUMNS.items())
+        if engine.dialect.name != "sqlite":
+            return False
+        with tempfile.TemporaryDirectory() as directory:
+            reference_url = f"sqlite:///{Path(directory) / 'baseline.db'}"
+            command.upgrade(alembic_config(reference_url), BASELINE_REVISION)
+            reference_engine = create_engine(reference_url)
+            try:
+                return _schema_signature(inspector) == _schema_signature(inspect(reference_engine))
+            finally:
+                reference_engine.dispose()
     finally:
         engine.dispose()
+
+
+def _schema_signature(inspector) -> dict:
+    return {
+        table: {
+            "columns": tuple((column["name"], str(column["type"]), column["nullable"], column["default"], column["primary_key"]) for column in inspector.get_columns(table)),
+            "foreign_keys": tuple(sorted((foreign_key["constrained_columns"], foreign_key["referred_table"], foreign_key["referred_columns"]) for foreign_key in inspector.get_foreign_keys(table))),
+            "unique": tuple(sorted(tuple(item["column_names"]) for item in inspector.get_unique_constraints(table))),
+            "indexes": tuple(sorted((tuple(item["column_names"]), item["unique"]) for item in inspector.get_indexes(table))),
+        }
+        for table in sorted(table for table in inspector.get_table_names() if table != "alembic_version")
+    }
 
 
 def database_revision(database_url: str) -> str | None:
@@ -70,8 +91,11 @@ def database_revision(database_url: str) -> str | None:
 
 def upgrade(database_url: str) -> None:
     config = alembic_config(database_url)
-    inspector = inspect(create_engine(database_url))
-    tables = set(inspector.get_table_names())
+    engine = create_engine(database_url)
+    try:
+        tables = set(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
     if "alembic_version" not in tables and tables:
         if not legacy_schema_matches(database_url):
             raise MigrationSafetyError("unversioned database does not match the known legacy baseline; refusing migration")

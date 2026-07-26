@@ -51,3 +51,11 @@ git diff --check 3a3e283..HEAD                => exit 0（空白修复提交后�
 
 - 将 `alembic` 纳入正式依赖后，部署镜像需要依据更新后的 `requirements.txt` 重建；旧镜像缺少该依赖，不能直接执行迁移 CLI。
 - 未版本化数据库仅在完整匹配已知旧基线时自动升级；其他情况会安全拒绝，需人工核验并决定迁移路径。
+
+## 修复轮次 1
+
+- Dockerfile 现显式复制 `alembic.ini` 与 `migrations/`；新增测试覆盖该生产镜像产物契约。由于本机没有 `python:3.12-slim` 且 Docker Hub 授权请求返回 EOF，无法在本轮重建生产镜像；Dockerfile 内容测试已通过。
+- SQLite 未版本化旧库现以实际执行 `0001` 生成的参考 Schema 进行完整 inspector 指纹比对，覆盖列类型、nullable、默认值、主键、外键、唯一约束和索引；同名同列但约束漂移的测试会被拒绝且不写版本表。
+- 生产启动已删除 `seed_data()` 调用，仅检查 Alembic 版本；显式 Harness 初始化入口仍保留。
+- 0002 已补齐新增表索引；为兼容 MySQL 8，移除了 TEXT 列的服务端默认值（这些值由 ORM 写入默认值处理）。
+- 隔离 MySQL 8 验证：创建专用 Docker 网络与 `--tmpfs /var/lib/mysql` 的 `mindbridge-migration-test-mysql` 容器；首次 RED 暴露 MySQL 拒绝 TEXT 默认值。修复后空库 `upgrade` 与 `check` 均通过，随后删除容器和网络。未连接现有业务数据库。

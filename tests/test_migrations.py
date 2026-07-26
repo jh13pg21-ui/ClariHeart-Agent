@@ -5,7 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from alembic import command
 from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, Text, create_engine, inspect, text
+
+from app.cli.migrate import BASELINE_REVISION, alembic_config
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,10 +39,24 @@ def create_legacy_schema(url: str) -> None:
     metadata.create_all(create_engine(url))
 
 
+def create_exact_legacy_schema(url: str) -> None:
+    command.upgrade(alembic_config(url), BASELINE_REVISION)
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE alembic_version"))
+    engine.dispose()
+
+
 def run_upgrade(url: str) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["DATABASE_URL"] = url
     return subprocess.run([sys.executable, "-m", "app.cli.migrate", "upgrade"], cwd=ROOT, env=environment, text=True, capture_output=True)
+
+
+def run_check(url: str) -> subprocess.CompletedProcess[str]:
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = url
+    return subprocess.run([sys.executable, "-m", "app.cli.migrate", "check"], cwd=ROOT, env=environment, text=True, capture_output=True)
 
 
 class MigrationWorkflowTests(unittest.TestCase):
@@ -61,11 +78,12 @@ class MigrationWorkflowTests(unittest.TestCase):
         self.assertTrue({"password_algorithm", "must_reset_password", "disabled"} <= columns)
 
     def test_upgrade_preserves_existing_rows(self):
-        create_legacy_schema(self.legacy_url)
+        create_exact_legacy_schema(self.legacy_url)
         engine = create_engine(self.legacy_url)
         with engine.begin() as connection:
-            connection.execute(text("INSERT INTO user_accounts (id, username, display_name, password_hash, roles_csv) VALUES (1, 'student', 'Student', 'old-hash', 'ROLE_USER')"))
-            connection.execute(text("INSERT INTO chat_messages (id, user_id, session_id, role, content) VALUES (1, 1, 1, 'user', 'keep this message')"))
+            connection.execute(text("INSERT INTO user_accounts (id, username, display_name, password_hash, roles_csv, created_at) VALUES (1, 'student', 'Student', 'old-hash', 'ROLE_USER', CURRENT_TIMESTAMP)"))
+            connection.execute(text("INSERT INTO chat_sessions (id, public_id, title, user_id, created_at, updated_at) VALUES (1, 'legacy-session', 'Legacy', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"))
+            connection.execute(text("INSERT INTO chat_messages (id, user_id, session_id, role, content, created_at) VALUES (1, 1, 1, 'user', 'keep this message', CURRENT_TIMESTAMP)"))
         result = run_upgrade(self.legacy_url)
         self.assertEqual(result.returncode, 0, result.stderr)
         with engine.connect() as connection:
@@ -73,7 +91,7 @@ class MigrationWorkflowTests(unittest.TestCase):
             self.assertEqual(connection.execute(text("SELECT password_hash FROM user_accounts WHERE id = 1")).scalar_one(), "old-hash")
 
     def test_matching_legacy_schema_is_stamped_then_upgraded_to_head(self):
-        create_legacy_schema(self.legacy_url)
+        create_exact_legacy_schema(self.legacy_url)
         result = run_upgrade(self.legacy_url)
         self.assertEqual(result.returncode, 0, result.stderr)
         with create_engine(self.legacy_url).connect() as connection:
@@ -86,6 +104,12 @@ class MigrationWorkflowTests(unittest.TestCase):
         result = run_upgrade(self.unknown_url)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("alembic_version", inspect(engine).get_table_names())
+
+    def test_same_names_and_columns_with_legacy_constraint_drift_is_rejected(self):
+        create_legacy_schema(self.legacy_url)
+        result = run_upgrade(self.legacy_url)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("alembic_version", inspect(create_engine(self.legacy_url)).get_table_names())
 
     def test_upgrade_is_idempotent(self):
         self.assertEqual(run_upgrade(self.empty_url).returncode, 0)
@@ -105,3 +129,13 @@ class MigrationWorkflowTests(unittest.TestCase):
             orm_foreign_keys = {foreign_key.target_fullname for foreign_key in Base.metadata.tables[name].foreign_keys}
             database_foreign_keys = {foreign_key["referred_table"] + "." + foreign_key["referred_columns"][0] for foreign_key in inspector.get_foreign_keys(name)}
             self.assertEqual(database_foreign_keys, orm_foreign_keys)
+
+    def test_check_returns_zero_only_at_head(self):
+        self.assertNotEqual(run_check(self.empty_url).returncode, 0)
+        self.assertEqual(run_upgrade(self.empty_url).returncode, 0)
+        self.assertEqual(run_check(self.empty_url).returncode, 0)
+
+    def test_production_image_copies_alembic_configuration_and_scripts(self):
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("COPY alembic.ini ./", dockerfile)
+        self.assertIn("COPY migrations ./migrations", dockerfile)
