@@ -98,51 +98,50 @@ class ReportService:
             for row in rows
         ]
 
-
-def agent_run_traces(self) -> list[AgentRunTraceResponse]:
-    rows = self.db.query(AgentRunTrace).order_by(AgentRunTrace.created_at.desc()).limit(100).all()
-    responses = []
-    for row in rows:
-        user = self.db.get(UserAccount, row.user_id)
-        session = self.db.get(ChatSession, row.session_id)
-        responses.append(
-            AgentRunTraceResponse(
-                id=row.id,
-                sessionId=session.public_id if session else "",
-                reportId=row.report_id,
-                username=user.username if user else "",
-                intent=row.intent,
-                riskLevel=row.risk_level,
-                originalInput=row.original_input,
-                sanitizedInput=row.sanitized_input,
-                memoryBrief=row.memory_brief,
-                agentSteps=_loads(row.agent_steps_json, []),
-                retrievedKnowledge=_loads(row.retrieved_knowledge_json, []),
-                responseMessages=_loads(row.response_messages_json, []),
-                assessment=_loads(row.assessment_json, {}),
-                createdAt=row.created_at,
+    def agent_run_traces(self) -> list[AgentRunTraceResponse]:
+        rows = self.db.query(AgentRunTrace).order_by(AgentRunTrace.created_at.desc()).limit(100).all()
+        responses = []
+        for row in rows:
+            user = self.db.get(UserAccount, row.user_id)
+            session = self.db.get(ChatSession, row.session_id)
+            responses.append(
+                AgentRunTraceResponse(
+                    id=row.id,
+                    sessionId=session.public_id if session else "",
+                    reportId=row.report_id,
+                    username=user.username if user else "",
+                    intent=row.intent,
+                    riskLevel=row.risk_level,
+                    originalInput=row.original_input,
+                    sanitizedInput=row.sanitized_input,
+                    memoryBrief=row.memory_brief,
+                    agentSteps=_loads(row.agent_steps_json, []),
+                    retrievedKnowledge=_loads(row.retrieved_knowledge_json, []),
+                    responseMessages=_loads(row.response_messages_json, []),
+                    assessment=_loads(row.assessment_json, {}),
+                    createdAt=row.created_at,
+                )
             )
-        )
-    return responses
+        return responses
 
-def tool_audits(self) -> list[ToolAuditResponse]:
-    rows = self.db.query(ToolAuditRecord).order_by(ToolAuditRecord.created_at.desc()).limit(100).all()
-    return [
-        ToolAuditResponse(
-            id=row.id,
-            jobId=row.job_id,
-            reportId=row.report_id,
-            toolName=row.tool_name,
-            policy=row.policy,
-            allowed=row.allowed,
-            status=row.status,
-            reason=row.reason,
-            payload=_loads(row.payload, {}),
-            createdAt=row.created_at,
-            updatedAt=row.updated_at,
-        )
-        for row in rows
-    ]
+    def tool_audits(self) -> list[ToolAuditResponse]:
+        rows = self.db.query(ToolAuditRecord).order_by(ToolAuditRecord.created_at.desc()).limit(100).all()
+        return [
+            ToolAuditResponse(
+                id=row.id,
+                jobId=row.job_id,
+                reportId=row.report_id,
+                toolName=row.tool_name,
+                policy=row.policy,
+                allowed=row.allowed,
+                status=row.status,
+                reason=row.reason,
+                payload=_loads(row.payload, {}),
+                createdAt=row.created_at,
+                updatedAt=row.updated_at,
+            )
+            for row in rows
+        ]
 
     def conversation(self, public_id: str) -> ConversationResponse:
         session = self.db.query(ChatSession).filter(ChatSession.public_id == public_id).first()
