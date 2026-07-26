@@ -143,3 +143,126 @@ MySQL 自动化用例确认：
 - `VARCHAR(63)` 长度漂移、删除外键、增加非基线索引均返回非零，且不创建 `alembic_version`。
 
 全量测试仅出现项目既有的 `datetime.utcnow` 与 FastAPI `on_event` 弃用警告，无失败。轮次 4 的 follow-up 提交 SHA 以本节所在提交及最终交付 HEAD 为准。
+
+## 修复轮次 5：冻结历史 ORM 基线与 MySQL 防误删护栏
+
+### 状态
+
+DONE。本轮以 `3a3e283` 的历史 `app/models/entities.py` 为事实源完成独立审计，不再用 `0001` 生成参考结构后自证。修复轮次 5 的实现提交为
+`aedc4c7b`（`fix: freeze historical migration schema`）。
+
+截至本轮交付，复审指出的历史索引/default 不等价、0002 default 语义不一致和 MySQL 测试误删风险均已闭环；独立终审发现的 SQLite 索引名及 FK options 指纹遗漏也已通过 RED/GREEN 补齐，无未解决的 Critical/Important。
+
+### 历史 ORM 与 0001 等价证据
+
+- 新增 `migrations/legacy_schema.py` 作为单一权威 `MetaData`；生产代码和测试运行时均不依赖 git。
+- 人工冻结并由契约测试逐项验证历史 13 张表、全部列顺序/类型/nullable、13 个 `id` 主键、7 个 FK、26 个固定命名索引及 35 个 Python client defaults。
+- 历史 ORM 的 server defaults 为 0 个。旧 `0001` 错误增加的 7 个 server defaults 已全部移除：
+  `roles_csv`、`owner`、`attempts`、`max_attempts`、`risk_level`、`policy`、`allowed`。
+- `username`、`public_id`、`risk_cases.report_id` 保持为历史 ORM 的具名唯一索引，而不是额外 `UniqueConstraint`。
+- `0001_existing_schema_baseline` revision id 保持不变，并直接从冻结 `MetaData` 创建结构；CLI 同样直接从该对象比较，不再动态加载或执行 `0001`。
+
+初始契约 RED：
+
+```text
+python -m unittest tests.test_legacy_schema_contract -v
+=> Ran 1 test, FAILED (failures=1)
+=> migrations.legacy_schema 不存在
+```
+
+冻结 Schema 接入旧库升级路径后的 RED：
+
+```text
+python -m unittest tests.test_migrations -v
+=> Ran 12 tests, FAILED (failures=4)
+```
+
+四项失败分别证明旧 `0001` 不等价、冻结历史 SQLite 未版本库被误拒、旧数据升级被误拒，以及 head 与当前 ORM 不一致。
+
+独立终审还发现并复现两个 SQLite 指纹缺口：
+
+```text
+同列/同 unique 但错误索引名 => CLI returncode 0（错误 stamp）
+同目标 FK 增加 ON DELETE CASCADE => CLI returncode 0（错误 stamp）
+```
+
+签名纳入索引/唯一约束名称及规范化 FK options 后，两项均被拒绝且不创建 `alembic_version`。
+
+### 0002 与当前 ORM 对齐
+
+- 移除 `security_audit_records.resource_id/ip_address` 及
+  `outbox_events.status/attempts` 的错误 server defaults；这些仍由 ORM client defaults 处理。
+- 保留 ORM 与迁移双方确实声明的 server defaults：
+  `password_algorithm`、`must_reset_password`、`disabled`、`auth_sessions.revoked`。
+- MySQL Boolean 的 `true/false` 与 `1/0` 继续按方言等价比较。
+- 所有 TEXT 列均无 MySQL 8 不兼容的 server default。
+- SQLite head 与当前 `Base.metadata.create_all()` 的所有表、列、类型、nullable、PK、FK、UK、索引名称/唯一性和 server defaults 物理签名一致。
+
+### MySQL destructive 测试护栏
+
+`tests/test_migrations_mysql.py` 在任何 `SET FOREIGN_KEY_CHECKS` 或 `DROP TABLE` 前执行：
+
+1. 要求 `MINDBRIDGE_TEST_MYSQL_URL`；
+2. 要求 `MINDBRIDGE_ALLOW_DESTRUCTIVE_DB_TESTS=1`；
+3. 使用 SQLAlchemy 解析 URL 中的数据库名；
+4. 连接后查询 `SELECT DATABASE()`；
+5. 要求 URL 与实际库名完全一致，且库名以 `mindbridge_test_` 开头。
+
+生产样式库名、缺少确认以及 URL/实际库不一致的单测均会在 transaction/DDL 前失败。安全契约 RED 为 3 项失败；最小实现后：
+
+```text
+python -m unittest tests.test_mysql_test_safety -v
+=> Ran 5 tests, OK
+```
+
+无 MySQL URL 或无双确认时，7 项 destructive 集成测试全部 Skip，不会创建 engine 或执行 DDL。
+
+### 隔离 MySQL 8 与无损升级证据
+
+只使用本轮一次性环境：
+
+- 容器：`mindbridge-t2-fix5-mysql`，镜像 `mysql:8.0`，无宿主端口；
+- 专网：`mindbridge-t2-fix5-net`；
+- 数据目录：`/var/lib/mysql` tmpfs；
+- 数据库：`mindbridge_test_migrations`；
+- 用户：`mindbridge_test_runner`。
+
+`SHOW GRANTS` 仅显示全局 `USAGE ON *.*` 和目标库级
+`ALL PRIVILEGES ON mindbridge_test_migrations.*`，没有全局 CREATE DATABASE 权限。
+
+```text
+python -m unittest tests.test_migrations_mysql -v
+=> Ran 7 tests in 8.631s, OK
+```
+
+MySQL 自动化确认：
+
+- 直接由冻结历史 ORM 等价 `MetaData.create_all()` 创建的未版本库可自动 stamp 并升级到 head；
+- `user_accounts.password_hash='legacy-hash'` 与
+  `chat_messages.content='preserve-me'` 升级后逐值不变；
+- `VARCHAR(63)`、删除 FK、额外索引及错误 server default 漂移均被拒绝，且不创建 `alembic_version`；
+- head 与当前 ORM 的列顺序、PK、type/FK/UK/index/default 无 autogenerate 差异；
+- 二次升级幂等，版本表仅一行。
+
+验证后按精确 ID/名称删除容器和网络，并用精确名称过滤复查为空；未连接或修改任何既有 MindBridge 数据库。
+
+### 最终验证
+
+```text
+python -m unittest tests.test_legacy_schema_contract tests.test_migrations tests.test_mysql_test_safety -v
+=> Ran 19 tests, OK
+
+MINDBRIDGE_TEST_MYSQL_URL=<隔离 URL>
+MINDBRIDGE_ALLOW_DESTRUCTIVE_DB_TESTS=1
+python -m unittest discover -s tests -v
+=> Ran 44 tests in 28.817s, OK
+
+python -m app.cli.migrate check
+alembic.command.check(...)
+=> No new upgrade operations detected.
+
+git diff --check
+=> exit 0
+```
+
+全量测试只出现项目既有的 `datetime.utcnow` 与 FastAPI `on_event` 弃用警告。最终两个 SQLite 指纹补强发生在 44 项全量之后，已由最新 19 项历史/SQLite/护栏测试单独覆盖；它们不进入 MySQL 方言分支，也不改变迁移 DDL。
