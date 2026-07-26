@@ -1,5 +1,3 @@
-const AUTH_KEY = "mindbridge.auth";
-
 const state = {
   profile: null,
   modelName: "mock"
@@ -28,30 +26,21 @@ const els = {
   backupVector: document.querySelector("#backupVector")
 };
 
-function readAuth() {
-  try {
-    return JSON.parse(sessionStorage.getItem(AUTH_KEY) || "null");
-  } catch {
-    return null;
-  }
-}
-
-function clearAuth() {
-  sessionStorage.removeItem(AUTH_KEY);
-}
-
-function authHeader() {
-  const auth = readAuth();
-  if (!auth?.token) {
-    window.location.replace("/");
-    return "";
-  }
-  return `Basic ${auth.token}`;
+function csrfToken() {
+  const cookie = document.cookie.split("; ").find((item) => item.startsWith("mindbridge_csrf="));
+  return cookie ? decodeURIComponent(cookie.split("=", 2)[1]) : "";
 }
 
 async function api(path, options = {}) {
-  const headers = { ...(options.headers || {}), Authorization: authHeader() };
-  const response = await fetch(path, { ...options, headers });
+  const headers = { ...(options.headers || {}) };
+  if (["POST", "PUT", "PATCH", "DELETE"].includes((options.method || "GET").toUpperCase())) {
+    headers["X-CSRF-Token"] = csrfToken();
+  }
+  const response = await fetch(path, { ...options, headers, credentials: "same-origin" });
+  if (response.status === 401) {
+    window.location.replace("/");
+    throw new Error("登录状态已失效");
+  }
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `${response.status} ${response.statusText}`);
@@ -86,7 +75,7 @@ function roleLabel(role) {
 
 async function checkHealth() {
   try {
-    const response = await fetch("/actuator/health");
+    const response = await fetch("/actuator/health", { credentials: "same-origin" });
     const body = await response.json();
     setPill(els.serviceState, body.status === "UP" ? "服务正常" : `服务 ${body.status}`, body.status === "UP" ? "ok" : "danger");
   } catch {
@@ -106,7 +95,6 @@ async function loadProfile() {
     els.activeAccount.textContent = profile.displayName || profile.username;
     return profile;
   } catch {
-    clearAuth();
     window.location.replace("/");
     return null;
   }
@@ -319,9 +307,12 @@ async function runKnowledgeAction(kind) {
   }
 }
 
-function logout() {
-  clearAuth();
-  window.location.assign("/");
+async function logout() {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } finally {
+    window.location.assign("/");
+  }
 }
 
 els.switchAccount.addEventListener("click", logout);

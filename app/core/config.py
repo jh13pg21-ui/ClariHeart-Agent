@@ -5,6 +5,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    app_environment: str = "production"
+    jwt_secret_key: str = ""
+    jwt_algorithm: str = "HS256"
+    access_token_minutes: int = 15
+    refresh_token_days: int = 7
+    auth_secure_cookie: bool = True
+    auth_cookie_samesite: str = "lax"
     agent_framework: str = "event_driven_multi_agent"
     agent_max_rounds: int = 8
     agent_max_claims_per_round: int = 4
@@ -87,6 +94,12 @@ class Settings(BaseSettings):
     @property
     def project_root(self) -> Path:
         return Path(__file__).resolve().parents[2]
+
+    def validate_auth_configuration(self) -> None:
+        if self.jwt_algorithm != "HS256":
+            raise ValueError("JWT_ALGORITHM 必须为 HS256")
+        if self.app_environment.lower() != "test" and len(self.jwt_secret_key.encode("utf-8")) < 32:
+            raise ValueError("非测试环境必须通过 JWT_SECRET_KEY 提供至少 32 字节的 JWT 密钥")
 
 
 @lru_cache

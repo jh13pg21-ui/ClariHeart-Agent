@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -15,6 +15,7 @@ from app.services.chat import ChatService
 from app.services.knowledge import KnowledgeService
 from app.services.model_assets import finetuned_model_status
 from app.services.report import ReportService
+from app.services.security_audit import SecurityAuditService
 from app.services.skills import MindBridgeSkillLibrary
 
 router = APIRouter()
@@ -143,11 +144,46 @@ def admin_tool_audits(_: Annotated[UserAccount, Depends(require_admin)], db: Ann
 
 
 @router.get("/api/admin/conversations/{session_id}")
-def admin_conversation(session_id: str, _: Annotated[UserAccount, Depends(require_admin)], db: Annotated[Session, Depends(get_db)]):
+def admin_conversation(
+    session_id: str,
+    request: Request,
+    user: Annotated[UserAccount, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    audit = SecurityAuditService(db)
+    ip_address = request.client.host if request.client else ""
     try:
-        return ReportService(db).conversation(session_id)
+        result = ReportService(db).conversation(session_id)
     except ValueError as exc:
+        audit.record(
+            user,
+            action="admin_conversation_read",
+            resource_type="chat_session",
+            resource_id=session_id,
+            outcome="not_found",
+            ip_address=ip_address,
+        )
         raise HTTPException(404, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        audit.record(
+            user,
+            action="admin_conversation_read",
+            resource_type="chat_session",
+            resource_id=session_id,
+            outcome="error",
+            ip_address=ip_address,
+        )
+        raise
+    audit.record(
+        user,
+        action="admin_conversation_read",
+        resource_type="chat_session",
+        resource_id=session_id,
+        outcome="success",
+        ip_address=ip_address,
+    )
+    return result
 
 
 @router.post("/api/admin/knowledge")

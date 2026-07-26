@@ -27,12 +27,16 @@ def seed_data(db: Session) -> None:
             username="admin",
             display_name="Counselor Admin",
             password_hash=hash_password("admin123"),
+            password_algorithm="argon2id",
+            must_reset_password=False,
         )
         admin.roles = {"ROLE_ADMIN", "ROLE_USER"}
         student = UserAccount(
             username="student",
             display_name="Demo Student",
             password_hash=hash_password("student123"),
+            password_algorithm="argon2id",
+            must_reset_password=False,
         )
         student.roles = {"ROLE_USER"}
         db.add_all([admin, student])
