@@ -325,9 +325,11 @@ def run_agent_routing_harness(context: HarnessContext) -> dict:
             db.add(session)
             db.commit()
             db.refresh(session)
-            result = MindBridgeAgentHarness(db, context.settings).run(
-                user,
-                ChatRequest(message=case["message"], sessionId=session.public_id),
+            result = asyncio.run(
+                MindBridgeAgentHarness(db, context.settings).run(
+                    user,
+                    ChatRequest(message=case["message"], sessionId=session.public_id),
+                )
             )
             step_agents = [step.agent for step in result.agent_steps]
             expect(result.intent.value == case["intent"], f"{case['id']} expected intent {case['intent']}, got {result.intent.value}")

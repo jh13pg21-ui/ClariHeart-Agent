@@ -18,6 +18,7 @@ from app.services.memory import RedisShortTermMemoryStore
 from app.services.privacy import PrivacySanitizer
 from app.services.tool_queue import ToolQueueService
 from app.services.trace import AgentTraceService
+from app.services.output_safety import OutputSafetyDecision
 
 
 @dataclass
@@ -39,6 +40,8 @@ class AgentHarnessOutcome:
     risk_level: str | None
     assessment: PsychologyAssessment | None
     response_messages: list[AiMessage]
+    response_text: str
+    output_safety: OutputSafetyDecision
     agent_steps: list[AgentStep]
     retrieved_knowledge: list[SearchResult]
     report_id: int | None
@@ -60,15 +63,20 @@ class MindBridgeAgentHarness:
         self.privacy = PrivacySanitizer()
         self.memory = RedisShortTermMemoryStore(settings)
 
-    def run(self, user: UserAccount, request: ChatRequest) -> AgentHarnessOutcome:
+    async def run(self, user: UserAccount, request: ChatRequest) -> AgentHarnessOutcome:
         original_input = request.message.strip()
         model_input = self.privacy.sanitize(original_input)
         session = self._resolve_session(user, request.sessionId, original_input)
-        agent_run = create_agent_runtime(self.db, self.settings).run(user, session, original_input, model_input)
+        agent_run = await create_agent_runtime(self.db, self.settings).run(
+            user,
+            session,
+            original_input,
+            model_input,
+        )
         self.save_message(user, session, MessageRole.USER, original_input)
 
         report = self._create_report(user, session, original_input, agent_run)
-        risk_level = report.risk_level if report is not None else None
+        risk_level = agent_run.risk_level.value
         trace = AgentTraceService(self.db).save_run(
             user=user,
             session=session,
@@ -87,6 +95,8 @@ class MindBridgeAgentHarness:
             risk_level=risk_level,
             assessment=agent_run.assessment,
             response_messages=agent_run.response_messages,
+            response_text=agent_run.response_text,
+            output_safety=agent_run.output_safety,
             agent_steps=agent_run.steps,
             retrieved_knowledge=agent_run.retrieved_knowledge,
             report_id=report.id if report is not None else None,

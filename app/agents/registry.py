@@ -38,7 +38,7 @@ class AutonomousAgent(Protocol):
     def decide(self, task: AgentTask, board: CollaborationBlackboard) -> AgentDecision:
         ...
 
-    def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
+    async def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
         ...
 
 

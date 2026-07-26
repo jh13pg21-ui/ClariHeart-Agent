@@ -28,6 +28,11 @@ from app.services.agent_models import AgentModelRegistry
 from app.services.ai import AiClient, PromptTemplates
 from app.services.knowledge import KnowledgeService, SearchResult
 from app.services.memory import RedisShortTermMemoryStore
+from app.services.output_safety import (
+    OutputSafetyDecision,
+    OutputSafetyStatus,
+    safe_fallback,
+)
 
 
 class EventDrivenAgentRuntimeService:
@@ -49,7 +54,7 @@ class EventDrivenAgentRuntimeService:
         self.model_registry = AgentModelRegistry(settings)
         self.private_memory = AgentPrivateMemory(settings)
 
-    def run(self, user: UserAccount, session: ChatSession, original_input: str, model_input: str) -> AgentRunResult:
+    async def run(self, user: UserAccount, session: ChatSession, original_input: str, model_input: str) -> AgentRunResult:
         services = AgentRuntimeServices(
             db=self.db,
             settings=self.settings,
@@ -83,7 +88,7 @@ class EventDrivenAgentRuntimeService:
             )
         )
         registry = AgentRegistry(agents)
-        final_board = EventDrivenCoordinator(registry, coordinator_agent, self.settings).run(board)
+        final_board = await EventDrivenCoordinator(registry, coordinator_agent, self.settings).run(board)
         return self._to_result(final_board, user)
 
     def _to_result(self, board: CollaborationBlackboard, user: UserAccount) -> AgentRunResult:
@@ -91,23 +96,43 @@ class EventDrivenAgentRuntimeService:
         risk = self._select_risk(board)
         context = board.latest_artifact("context")
         risk_artifact = board.latest_artifact("risk")
-        accepted = board.accepted_artifact() or board.latest_artifact("response_proposal")
+        accepted = board.accepted_artifact() or board.latest_artifact("response_candidate")
         memory_brief = "无相关历史记忆。"
         retrieved: list[SearchResult] = []
-        response_messages: list[AiMessage] = []
+        response_text = ""
+        output_safety = OutputSafetyDecision(
+            OutputSafetyStatus.FALLBACK,
+            safe_fallback(risk),
+            "no reviewed candidate",
+        )
         if context:
             memory_brief = context.payload.get("memoryBrief") or memory_brief
             retrieved = context.payload.get("retrievedKnowledge") or []
         if accepted:
-            response_messages = accepted.payload.get("messages") or []
-        if not response_messages:
-            response_messages = self._fallback_messages(intent, risk, user.display_name, board.model_input)
+            review = board.latest_artifact("output_safety")
+            if review and review.metadata.get("responseArtifactId") == accepted.id:
+                try:
+                    status = OutputSafetyStatus(review.payload.get("status"))
+                except ValueError:
+                    status = OutputSafetyStatus.FALLBACK
+                if status in {OutputSafetyStatus.APPROVED, OutputSafetyStatus.FALLBACK}:
+                    response_text = str(review.payload.get("text", "")).strip()
+                    output_safety = OutputSafetyDecision(
+                        status,
+                        response_text or safe_fallback(risk),
+                        str(review.payload.get("reason", "")),
+                    )
+        if not response_text:
+            response_text = output_safety.text
+        response_messages = [AiMessage(role="assistant", content=response_text)]
         assessment = risk_artifact.payload.get("assessment") if risk_artifact else None
         return AgentRunResult(
             intent=intent,
             risk_level=risk,
             assessment=assessment,
             retrieved_knowledge=retrieved,
+            response_text=response_text,
+            output_safety=output_safety,
             response_messages=response_messages,
             steps=self._events_to_steps(board),
             memory_brief=memory_brief,

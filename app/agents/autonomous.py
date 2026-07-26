@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import time
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -23,6 +26,12 @@ from app.schemas.dtos import AiMessage
 from app.services.agent_models import AgentModelRegistry
 from app.services.ai import AiClient, PromptTemplates, has_consult_signal, has_high_risk_signal
 from app.services.assessment import PsychologicalAssessmentService
+from app.services.output_safety import (
+    OutputSafetyDecision,
+    OutputSafetyStatus,
+    review_output,
+    safe_fallback,
+)
 
 if TYPE_CHECKING:
     from app.models.entities import ChatSession, UserAccount
@@ -126,8 +135,8 @@ class UnderstandingAgent(BaseAutonomousAgent):
             return AgentDecision(True, 0.82, "open user-turn task needs understanding")
         return AgentDecision(False, reason="task does not need understanding")
 
-    def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
-        intent = self._classify(board.model_input or board.user_input, board)
+    async def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
+        intent = await self._classify(board.model_input or board.user_input, board)
         confidence = 0.92 if intent == IntentType.RISK else 0.78
         payload = {
             "intent": intent.value,
@@ -155,7 +164,7 @@ class UnderstandingAgent(BaseAutonomousAgent):
             return True
         return bool(board.user_input and task.metadata.get("kind") in {"root", "understanding"})
 
-    def _classify(self, text: str, board: CollaborationBlackboard) -> IntentType:
+    async def _classify(self, text: str, board: CollaborationBlackboard) -> IntentType:
         lowered = text.lower()
         if has_high_risk_signal(lowered):
             return IntentType.RISK
@@ -167,7 +176,7 @@ class UnderstandingAgent(BaseAutonomousAgent):
                 *PromptTemplates.intent_prompt([], text),
                 AiMessage(role="system", content=f"{self.profile.system_prompt}\n私有记忆：\n{memory_context or '无'}"),
             ]
-            label = self.client().complete(messages).upper()
+            label = (await self.client().complete(messages)).upper()
             if "RISK" in label:
                 return IntentType.RISK
             if "CONSULT" in label:
@@ -203,8 +212,8 @@ class SafetyAgent(BaseAutonomousAgent):
     )
 
     def decide(self, task: AgentTask, board: CollaborationBlackboard) -> AgentDecision:
-        latest_response = board.latest_artifact("response_proposal")
-        latest_review = board.latest_artifact("safety_review")
+        latest_response = board.latest_artifact("response_candidate")
+        latest_review = board.latest_artifact("output_safety")
         if latest_response and (latest_review is None or latest_review.metadata.get("responseArtifactId") != latest_response.id):
             return AgentDecision(True, 0.95, "candidate response needs safety critique")
         if not board.latest_artifact("risk") and board.user_input:
@@ -214,15 +223,18 @@ class SafetyAgent(BaseAutonomousAgent):
             return AgentDecision(True, 0.8, "task explicitly asks for safety")
         return AgentDecision(False, reason="no safety work needed")
 
-    def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
-        response = board.latest_artifact("response_proposal")
-        review = board.latest_artifact("safety_review")
+    async def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
+        response = board.latest_artifact("response_candidate")
+        review = board.latest_artifact("output_safety")
         if response and (review is None or review.metadata.get("responseArtifactId") != response.id):
             return self._review_response(task, board, response)
-        return self._assess_risk(task, board)
+        return await self._assess_risk(task, board)
 
-    def _assess_risk(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
-        assessment = PsychologicalAssessmentService(self.client()).assess(board.model_input or board.user_input, _context_history(board))
+    async def _assess_risk(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
+        assessment = await PsychologicalAssessmentService(self.client()).assess(
+            board.model_input or board.user_input,
+            _context_history(board),
+        )
         payload = {
             "risk": assessment.risk.value,
             "emotion": assessment.emotion.value,
@@ -261,47 +273,60 @@ class SafetyAgent(BaseAutonomousAgent):
 
     def _review_response(self, task: AgentTask, board: CollaborationBlackboard, response: AgentArtifact) -> AgentTurnResult:
         risk = _risk_level(board)
-        messages = response.payload.get("messages", [])
-        combined = "\n".join(getattr(message, "content", str(message)) for message in messages)
-        approved = True
-        reason = "response proposal satisfies current safety constraints"
-        if risk == RiskLevel.HIGH and not any(word in combined for word in ["高风险处理规则", "当前安全", "可信任的人", "紧急"]):
-            approved = False
-            reason = "high-risk response proposal lacks immediate safety guidance"
+        decision = review_output(str(response.payload.get("text", "")), risk)
+        revision_count = int(response.payload.get("revisionCount", 0))
+        if decision.status == OutputSafetyStatus.REVISE and revision_count >= 1:
+            decision = OutputSafetyDecision(
+                OutputSafetyStatus.FALLBACK,
+                safe_fallback(risk),
+                "revision limit reached",
+            )
         payload = {
-            "approved": approved,
-            "reason": reason,
+            "status": decision.status.value,
+            "text": decision.text,
+            "reason": decision.reason,
             "responseArtifactId": response.id,
             "risk": risk.value,
             "privateMemoryKey": self.services.private_memory._key(self.name, self.services.session.public_id),
         }
-        kind = "safety_review" if approved else "critique"
         events = ()
         follow_up_tasks = ()
-        if not approved:
+        if decision.status == OutputSafetyStatus.REVISE:
             events = (
                 AgentEvent(
                     type=AgentEventType.REVISION_REQUESTED,
                     actor=self.name,
                     task_id=task.id,
                     artifact_id=response.id,
-                    message=reason,
+                    message=decision.reason,
                 ),
             )
             follow_up_tasks = (
                 AgentTask(
                     id=f"task:revise-response:{uuid.uuid4().hex[:8]}",
                     title="Revise unsafe response proposal",
-                    description=reason,
+                    description=decision.reason,
                     priority=TaskPriority.CRITICAL,
                     required_capabilities=frozenset({AgentCapability.RESPONSE.value}),
                     created_by=self.name,
-                    metadata={"kind": "response", "revisionOf": response.id},
+                    metadata={
+                        "kind": "response",
+                        "revisionOf": response.id,
+                        "revisionCount": 1,
+                    },
                 ),
             )
-        self.remember(f"review approved={approved}; reason={reason}")
+        self.remember(f"review status={decision.status.value}; reason={decision.reason}")
         return AgentTurnResult(
-            artifacts=(self._artifact(kind, payload, task, 0.95, {"responseArtifactId": response.id}),),
+            artifacts=(
+                self._artifact(
+                    "output_safety",
+                    payload,
+                    task,
+                    0.95,
+                    {"responseArtifactId": response.id},
+                ),
+            ),
             tasks=follow_up_tasks,
             events=events,
         )
@@ -321,6 +346,8 @@ class ContextAgent(BaseAutonomousAgent):
     )
 
     def decide(self, task: AgentTask, board: CollaborationBlackboard) -> AgentDecision:
+        if task.metadata.get("kind") == "memory" and not board.latest_artifact("memory"):
+            return AgentDecision(True, 0.9, "stage one requires independent memory prefetch")
         if board.latest_artifact("context"):
             return AgentDecision(False, reason="context artifact already exists")
         risk = _risk_level(board)
@@ -331,13 +358,35 @@ class ContextAgent(BaseAutonomousAgent):
             return AgentDecision(True, 0.82, "support path needs memory, RAG, and skill context")
         return AgentDecision(False, reason="context not necessary for current artifacts")
 
-    def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
+    async def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
         from app.services.memory import compact_history_for_prompt
         from app.services.skills import MindBridgeSkillLibrary
 
-        history = self._load_history()
+        if task.metadata.get("kind") == "memory":
+            history = await asyncio.to_thread(
+                self.services.memory.load_recent,
+                self.services.session.public_id,
+            )
+            compacted, brief = compact_history_for_prompt(
+                history,
+                self.services.settings,
+                board.model_input,
+            )
+            payload = {
+                "history": compacted,
+                "memoryBrief": brief or "无相关历史记忆。",
+                "privateMemoryKey": self.services.private_memory._key(
+                    self.name,
+                    self.services.session.public_id,
+                ),
+            }
+            return AgentTurnResult(
+                artifacts=(self._artifact("memory", payload, task, 0.9),),
+            )
+        memory = board.latest_artifact("memory")
+        history = list(memory.payload.get("history", [])) if memory else []
         compacted_history, deterministic_brief = compact_history_for_prompt(history, self.services.settings, board.model_input)
-        memory_brief = self._summarize_memory(history, board.model_input, deterministic_brief)
+        memory_brief = await self._summarize_memory(history, board.model_input, deterministic_brief)
         model_history = self._bounded_model_history([*compacted_history, AiMessage(role="user", content=board.model_input)])
         intent = _intent(board)
         risk = _risk_level(board)
@@ -346,7 +395,7 @@ class ContextAgent(BaseAutonomousAgent):
         query = ""
         skill_context = ""
         if intent != IntentType.CHAT or risk != RiskLevel.LOW:
-            query = self._rewrite_query(memory_brief, board.model_input)
+            query = await self._rewrite_query(memory_brief, board.model_input)
             retrieved = self.services.knowledge.retrieve(query, self.services.settings.knowledge_top_k)
             skill_context = MindBridgeSkillLibrary.response_skill_context(intent, risk, board.user_input)
         payload = {
@@ -372,44 +421,25 @@ class ContextAgent(BaseAutonomousAgent):
             ),
         )
 
-    def _load_history(self) -> list[AiMessage]:
-        from app.models.entities import ChatMessage
-
-        history = self.services.memory.load_recent(self.services.session.public_id)
-        if history:
-            return history
-        rows = (
-            self.services.db.query(ChatMessage)
-            .filter(ChatMessage.session_id == self.services.session.id)
-            .order_by(ChatMessage.created_at.desc())
-            .limit(self.services.settings.redis_memory_max_messages)
-            .all()
-        )
-        rows.reverse()
-        history = self.services.memory.messages_from_rows(rows)
-        if history:
-            self.services.memory.replace(self.services.session.public_id, history)
-        return history
-
-    def _rewrite_query(self, memory_brief: str, model_input: str) -> str:
+    async def _rewrite_query(self, memory_brief: str, model_input: str) -> str:
         try:
-            query = self.client().complete([
+            query = (await self.client().complete([
                 AiMessage(role="system", content=f"{self.profile.system_prompt}\n把学生输入改写成适合检索校园心理知识库的中文查询词，只输出查询词。"),
                 AiMessage(role="user", content=f"记忆摘要：\n{memory_brief}\n\n当前输入：\n{model_input}"),
-            ]).strip()
+            ])).strip()
             return (query or model_input)[:60]
         except Exception:
             return model_input[:60]
 
-    def _summarize_memory(self, history: list[AiMessage], current_input: str, fallback: str) -> str:
+    async def _summarize_memory(self, history: list[AiMessage], current_input: str, fallback: str) -> str:
         max_chars = max(120, self.services.settings.memory_summary_max_chars)
         if not history:
             return "无相关历史记忆。"
         try:
-            summary = self.client().complete([
+            summary = (await self.client().complete([
                 AiMessage(role="system", content=f"{self.profile.system_prompt}\n只输出 1-3 条中文记忆要点，不输出风险等级或诊断。"),
                 AiMessage(role="user", content=f"当前输入：\n{current_input}\n\n最近历史：\n{history[-12:]}"),
-            ]).strip()
+            ])).strip()
             return summary[:max_chars] or fallback
         except Exception:
             return fallback or "无相关历史记忆。"
@@ -437,7 +467,7 @@ class ResponseAgent(BaseAutonomousAgent):
     )
 
     def decide(self, task: AgentTask, board: CollaborationBlackboard) -> AgentDecision:
-        if board.latest_artifact("response_proposal") and "revisionOf" not in task.metadata:
+        if board.latest_artifact("response_candidate") and "revisionOf" not in task.metadata:
             return AgentDecision(False, reason="response proposal already exists")
         if not board.latest_artifact("intent") or not board.latest_artifact("risk"):
             return AgentDecision(False, reason="response needs intent and risk artifacts")
@@ -451,7 +481,7 @@ class ResponseAgent(BaseAutonomousAgent):
             return AgentDecision(True, 0.65, "explicit response task")
         return AgentDecision(False, reason="waiting for context")
 
-    def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
+    async def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
         intent = _intent(board)
         risk = _risk_level(board)
         context = board.latest_artifact("context")
@@ -497,17 +527,48 @@ class ResponseAgent(BaseAutonomousAgent):
                 *model_history,
             ]
             mode = "support"
+        profile = self.services.model_registry.profile_for(self.name)
+        started = time.perf_counter()
+        generation_status = "generated"
+        try:
+            text = (await self.client().complete(messages)).strip()
+        except Exception:
+            text = safe_fallback(risk)
+            generation_status = "fallback"
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
+        revision_count = int(task.metadata.get("revisionCount", 0))
+        prompt_summary = "\n".join(
+            f"{message.role}:{message.content}" for message in messages
+        )
         payload = {
-            "messages": messages,
+            "text": text,
+            "model": profile.model,
+            "provider": profile.provider,
+            "latencyMs": latency_ms,
             "mode": mode,
             "intent": intent.value,
             "risk": risk.value,
+            "revisionCount": revision_count,
+            "generationStatus": generation_status,
             "responseAgent": self.name,
             "privateMemoryKey": self.services.private_memory._key(self.name, self.services.session.public_id),
         }
         self.remember(f"response mode={mode}; intent={intent.value}; risk={risk.value}")
         return AgentTurnResult(
-            artifacts=(self._artifact("response_proposal", payload, task, 0.86),),
+            artifacts=(
+                self._artifact(
+                    "response_candidate",
+                    payload,
+                    task,
+                    0.86,
+                    {
+                        "promptSummaryHash": hashlib.sha256(
+                            prompt_summary.encode("utf-8")
+                        ).hexdigest(),
+                        "revisionOf": task.metadata.get("revisionOf", ""),
+                    },
+                ),
+            ),
             messages=(
                 AgentMessage(
                     id=f"msg:{uuid.uuid4().hex[:10]}",
@@ -536,7 +597,7 @@ class CoordinatorAgent(BaseAutonomousAgent):
     def decide(self, task: AgentTask, board: CollaborationBlackboard) -> AgentDecision:
         return AgentDecision(False, reason="CoordinatorAgent is driven by the event loop, not by fixed workflow slots")
 
-    def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
+    async def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
         return AgentTurnResult(close_task=False)
 
     def root_task(self, board: CollaborationBlackboard) -> AgentTask:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import uuid
+import asyncio
 from collections import defaultdict
 
 from app.agents.autonomous import CoordinatorAgent
@@ -33,7 +33,7 @@ class EventDrivenCoordinator:
         self.max_claims_per_agent = int(getattr(settings, "agent_max_claims_per_agent", 3))
         self.final_min_confidence = float(getattr(settings, "agent_final_acceptance_min_confidence", 0.6))
 
-    def run(self, board: CollaborationBlackboard) -> CollaborationBlackboard:
+    async def run(self, board: CollaborationBlackboard) -> CollaborationBlackboard:
         board = self._ensure_root_task(board)
         claim_counts: dict[str, int] = defaultdict(int)
         for round_number in range(1, self.max_rounds + 1):
@@ -55,9 +55,11 @@ class EventDrivenCoordinator:
                 candidates = self._claim_candidates(board, claim_counts)
                 if not candidates:
                     break
+            invocations = []
             for task, candidate in candidates:
                 current_task = board.tasks.get(task.id, task)
-                board = board.update_task(current_task.claim(candidate.agent.profile.name)).append_event(
+                claimed_task = current_task.claim(candidate.agent.profile.name)
+                board = board.update_task(claimed_task).append_event(
                     AgentEvent(
                         type=AgentEventType.TASK_CLAIMED,
                         actor=candidate.agent.profile.name,
@@ -66,9 +68,22 @@ class EventDrivenCoordinator:
                         metadata={"confidence": candidate.decision.confidence},
                     )
                 )
-                result = candidate.agent.act(current_task, board)
-                board = board.apply_turn_result(current_task, candidate.agent.profile.name, result)
+                invocations.append((claimed_task, candidate))
                 claim_counts[candidate.agent.profile.name] += 1
+            round_board = board
+            results = [None] * len(invocations)
+            async with asyncio.TaskGroup() as group:
+                for index, (task, candidate) in enumerate(invocations):
+                    group.create_task(
+                        self._run_candidate(index, task, candidate, round_board, results)
+                    )
+            completed = [
+                (task, candidate, results[index])
+                for index, (task, candidate) in enumerate(invocations)
+            ]
+            completed.sort(key=self._merge_key)
+            for task, candidate, result in completed:
+                board = board.apply_turn_result(task, candidate.agent.profile.name, result)
             board = self._derive_missing_work(board)
             board = self._try_accept_final(board)
             if board.final_artifact_id:
@@ -80,6 +95,28 @@ class EventDrivenCoordinator:
                 message="event-driven agent budget exhausted before final acceptance",
             )
         )
+
+    async def _run_candidate(self, index, task, candidate, round_board, results) -> None:
+        results[index] = await candidate.agent.act(task, round_board)
+
+    @staticmethod
+    def _merge_key(item) -> tuple[int, str, str]:
+        task, candidate, result = item
+        artifact_kinds = {artifact.kind for artifact in result.artifacts}
+        has_safety_override = any(
+            event.type == AgentEventType.SAFETY_OVERRIDE for event in result.events
+        )
+        if has_safety_override or "safety_event" in artifact_kinds:
+            category = 0
+        elif "risk" in artifact_kinds:
+            category = 1
+        elif "intent" in artifact_kinds:
+            category = 2
+        elif artifact_kinds.intersection({"memory", "context"}):
+            category = 3
+        else:
+            category = 4
+        return category, task.id, candidate.agent.profile.name
 
     def _ensure_root_task(self, board: CollaborationBlackboard) -> CollaborationBlackboard:
         if board.tasks:
@@ -96,6 +133,15 @@ class EventDrivenCoordinator:
             task_id="task:understand",
             title="Understand user turn",
             capability=AgentCapability.UNDERSTANDING,
+            priority=TaskPriority.HIGH,
+            condition=board.user_input != "",
+        )
+        board = self._ensure_task_for_missing_artifact(
+            board,
+            artifact_kind="memory",
+            task_id="task:prefetch-memory",
+            title="Prefetch conversation memory",
+            capability=AgentCapability.CONTEXT,
             priority=TaskPriority.HIGH,
             condition=board.user_input != "",
         )
@@ -118,9 +164,14 @@ class EventDrivenCoordinator:
             title="Gather contextual evidence",
             capability=AgentCapability.CONTEXT,
             priority=TaskPriority.CRITICAL if risk == RiskLevel.HIGH else TaskPriority.NORMAL,
-            condition=needs_context,
+            condition=(
+                needs_context
+                and board.latest_artifact("intent") is not None
+                and board.latest_artifact("risk") is not None
+                and board.latest_artifact("memory") is not None
+            ),
         )
-        has_response = board.latest_artifact("response_proposal") is not None
+        has_response = board.latest_artifact("response_candidate") is not None
         can_request_response = force_response or (
             board.latest_artifact("intent") is not None
             and board.latest_artifact("risk") is not None
@@ -128,16 +179,15 @@ class EventDrivenCoordinator:
         )
         board = self._ensure_task_for_missing_artifact(
             board,
-            artifact_kind="response_proposal",
+            artifact_kind="response_candidate",
             task_id="task:propose-response",
             title="Propose candidate response",
             capability=AgentCapability.RESPONSE,
             priority=TaskPriority.CRITICAL if risk == RiskLevel.HIGH else TaskPriority.HIGH,
             condition=can_request_response and not has_response,
         )
-        response = board.latest_artifact("response_proposal")
-        review = board.latest_artifact("safety_review")
-        critique = board.latest_artifact("critique")
+        response = board.latest_artifact("response_candidate")
+        review = board.latest_artifact("output_safety")
         if response and (review is None or review.metadata.get("responseArtifactId") != response.id):
             board = self._ensure_task(
                 board,
@@ -149,19 +199,6 @@ class EventDrivenCoordinator:
                     required_capabilities=frozenset({AgentCapability.SAFETY.value}),
                     created_by=self.coordinator_agent.name,
                     metadata={"kind": "safety_review", "responseArtifactId": response.id},
-                ),
-            )
-        if critique and critique.payload.get("approved") is False:
-            board = self._ensure_task(
-                board,
-                AgentTask(
-                    id=f"task:revise-response:{critique.id}",
-                    title="Revise response after critique",
-                    description=str(critique.payload.get("reason", "Safety critique requested revision.")),
-                    priority=TaskPriority.CRITICAL,
-                    required_capabilities=frozenset({AgentCapability.RESPONSE.value}),
-                    created_by=self.coordinator_agent.name,
-                    metadata={"kind": "response", "revisionOf": critique.payload.get("responseArtifactId", "")},
                 ),
             )
         return board
@@ -230,13 +267,13 @@ class EventDrivenCoordinator:
     def _try_accept_final(self, board: CollaborationBlackboard) -> CollaborationBlackboard:
         if board.final_artifact_id:
             return board
-        response = board.latest_artifact("response_proposal")
-        review = board.latest_artifact("safety_review")
+        response = board.latest_artifact("response_candidate")
+        review = board.latest_artifact("output_safety")
         if response is None or review is None:
             return board
         if review.metadata.get("responseArtifactId") != response.id:
             return board
-        if not review.payload.get("approved"):
+        if review.payload.get("status") not in {"APPROVED", "FALLBACK"}:
             return board
         if response.confidence < self.final_min_confidence:
             return board

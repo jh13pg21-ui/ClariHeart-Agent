@@ -4,6 +4,8 @@ import copy
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
+
 from app.core.config import Settings
 from app.services.ai import AiClient
 
@@ -28,6 +30,9 @@ class AgentModelProfile:
 class AgentModelRegistry:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0, connect=5.0, read=45.0, write=15.0, pool=5.0)
+        )
 
     def profile_for(self, agent_name: str) -> AgentModelProfile:
         alias = AGENT_MODEL_ALIASES.get(agent_name, _snake(agent_name.removesuffix("Agent")))
@@ -47,7 +52,7 @@ class AgentModelRegistry:
             settings.openai_model = profile.model
         else:
             settings.ollama_model = profile.model
-        return AiClient(settings)
+        return AiClient(settings, http_client=self.http_client)
 
     def _setting(self, name: str, fallback: Any) -> Any:
         value = getattr(self.settings, name, None)

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Iterable
+from typing import AsyncIterator, Iterable
 
 import httpx
 
@@ -60,18 +61,22 @@ class PromptTemplates:
 
 
 class AiClient:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, http_client: httpx.AsyncClient | None = None):
         self.settings = settings
+        self.http_client = http_client or httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0, connect=5.0, read=45.0, write=15.0, pool=5.0)
+        )
 
-    def complete(self, messages: list[AiMessage]) -> str:
+    async def complete(self, messages: list[AiMessage]) -> str:
         provider = self.settings.ai_provider.lower()
         if provider == "ollama":
-            return self._ollama(messages, stream=False)
+            return await self._ollama(messages)
         if provider == "openai":
-            return self._openai(messages, stream=False)
+            return await self._openai(messages)
+        await asyncio.sleep(0)
         return self._mock(messages)
 
-    async def stream(self, messages: list[AiMessage]):
+    async def stream(self, messages: list[AiMessage]) -> AsyncIterator[str]:
         provider = self.settings.ai_provider.lower()
         if provider == "ollama":
             async for token in self._ollama_stream(messages):
@@ -85,26 +90,27 @@ class AiClient:
         for chunk in split_text(text, 12):
             yield chunk
 
-    def _ollama(self, messages: list[AiMessage], stream: bool) -> str:
+    async def _ollama(self, messages: list[AiMessage]) -> str:
         payload = {
             "model": self.settings.ollama_model,
             "messages": [m.model_dump() for m in messages],
-            "stream": stream,
+            "stream": False,
             "options": {"temperature": self.settings.ai_temperature, "num_predict": self.settings.ai_max_tokens},
         }
-        response = httpx.post(f"{self.settings.ollama_base_url}/api/chat", json=payload, timeout=60)
+        async with asyncio.timeout(65.0):
+            response = await self.http_client.post(f"{self.settings.ollama_base_url}/api/chat", json=payload)
         response.raise_for_status()
         return response.json()["message"]["content"]
 
-    async def _ollama_stream(self, messages: list[AiMessage]):
+    async def _ollama_stream(self, messages: list[AiMessage]) -> AsyncIterator[str]:
         payload = {
             "model": self.settings.ollama_model,
             "messages": [m.model_dump() for m in messages],
             "stream": True,
             "options": {"temperature": self.settings.ai_temperature, "num_predict": self.settings.ai_max_tokens},
         }
-        async with httpx.AsyncClient(timeout=60) as client:
-            async with client.stream("POST", f"{self.settings.ollama_base_url}/api/chat", json=payload) as response:
+        async with asyncio.timeout(65.0):
+            async with self.http_client.stream("POST", f"{self.settings.ollama_base_url}/api/chat", json=payload) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line:
@@ -114,20 +120,25 @@ class AiClient:
                     if token:
                         yield token
 
-    def _openai(self, messages: list[AiMessage], stream: bool) -> str:
+    async def _openai(self, messages: list[AiMessage]) -> str:
         headers = {"Authorization": f"Bearer {self.settings.openai_api_key}"}
         payload = {
             "model": self.settings.openai_model,
             "messages": [m.model_dump() for m in messages],
             "temperature": self.settings.ai_temperature,
             "max_tokens": self.settings.ai_max_tokens,
-            "stream": stream,
+            "stream": False,
         }
-        response = httpx.post(f"{self.settings.openai_base_url}/chat/completions", headers=headers, json=payload, timeout=60)
+        async with asyncio.timeout(65.0):
+            response = await self.http_client.post(
+                f"{self.settings.openai_base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
 
-    async def _openai_stream(self, messages: list[AiMessage]):
+    async def _openai_stream(self, messages: list[AiMessage]) -> AsyncIterator[str]:
         headers = {"Authorization": f"Bearer {self.settings.openai_api_key}"}
         payload = {
             "model": self.settings.openai_model,
@@ -136,8 +147,13 @@ class AiClient:
             "max_tokens": self.settings.ai_max_tokens,
             "stream": True,
         }
-        async with httpx.AsyncClient(timeout=60) as client:
-            async with client.stream("POST", f"{self.settings.openai_base_url}/chat/completions", headers=headers, json=payload) as response:
+        async with asyncio.timeout(65.0):
+            async with self.http_client.stream(
+                "POST",
+                f"{self.settings.openai_base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data: "):

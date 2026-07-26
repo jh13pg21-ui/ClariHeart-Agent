@@ -8,11 +8,11 @@ from app.services.privacy import PrivacySanitizer
 
 
 class ExplodingAi:
-    def complete(self, messages):
+    async def complete(self, messages):
         raise AssertionError("high risk hard guard should not call the model")
 
 
-class PrivacyAndAssessmentTests(unittest.TestCase):
+class PrivacyAndAssessmentTests(unittest.IsolatedAsyncioTestCase):
     def test_privacy_sanitizer_masks_common_identifiers(self):
         text = PrivacySanitizer().sanitize("电话 13800138000 邮箱 a@example.com 身份证 110101199003071234")
 
@@ -31,8 +31,8 @@ class PrivacyAndAssessmentTests(unittest.TestCase):
         self.assertNotIn("a@example.com", payload["content"])
         self.assertEqual(payload["content"].count("[已脱敏]"), 2)
 
-    def test_high_risk_signal_uses_hard_guard_before_model(self):
-        result = PsychologicalAssessmentService(ExplodingAi()).assess("我不想活了，想结束生命")
+    async def test_high_risk_signal_uses_hard_guard_before_model(self):
+        result = await PsychologicalAssessmentService(ExplodingAi()).assess("我不想活了，想结束生命")
 
         self.assertEqual(result.risk, RiskLevel.HIGH)
         self.assertGreaterEqual(result.confidence, 0.9)

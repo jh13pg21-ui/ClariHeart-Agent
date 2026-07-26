@@ -9,7 +9,8 @@ from app.agents.harness import MindBridgeAgentHarness
 from app.core.config import Settings
 from app.models.entities import UserAccount
 from app.schemas.dtos import ChatRequest, ChatStreamEvent
-from app.services.ai import AiClient
+from app.core.enums import RiskLevel
+from app.services.ai import split_text
 
 
 logger = logging.getLogger(__name__)
@@ -19,18 +20,34 @@ class ChatService:
     def __init__(self, db: Session, settings: Settings):
         self.db = db
         self.settings = settings
-        self.ai = AiClient(settings)
         self.agent_harness = MindBridgeAgentHarness(db, settings)
 
     async def stream_chat(self, user: UserAccount, request: ChatRequest):
-        outcome = self.agent_harness.run(user, request)
+        outcome = await self.agent_harness.run(user, request)
         yield sse("meta", ChatStreamEvent(type="meta", sessionId=outcome.session.public_id).model_dump(by_alias=True))
-        assistant = []
-        async for token in self.ai.stream(outcome.response_messages):
-            assistant.append(token)
-            yield sse("token", ChatStreamEvent(type="token", sessionId=outcome.session.public_id, content=token).model_dump())
-        if assistant:
-            self.agent_harness.save_assistant_message(user, outcome.session, "".join(assistant))
+        text = outcome.response_text
+        risk = RiskLevel(outcome.risk_level or RiskLevel.LOW.value)
+        if risk == RiskLevel.HIGH:
+            yield sse(
+                "message",
+                ChatStreamEvent(
+                    type="message",
+                    sessionId=outcome.session.public_id,
+                    content=text,
+                ).model_dump(),
+            )
+        else:
+            for token in split_text(text, 12):
+                yield sse(
+                    "token",
+                    ChatStreamEvent(
+                        type="token",
+                        sessionId=outcome.session.public_id,
+                        content=token,
+                    ).model_dump(),
+                )
+        if text:
+            self.agent_harness.save_assistant_message(user, outcome.session, text)
         try:
             await self.agent_harness.dispatch_tools(outcome.tool_plan)
         except Exception as exc:

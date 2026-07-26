@@ -51,7 +51,7 @@ class DemoAgent:
     def decide(self, task, board):
         return AgentDecision(True, self.confidence, f"{self.profile.name} claims")
 
-    def act(self, task, board):
+    async def act(self, task, board):
         return AgentTurnResult(
             artifacts=(
                 AgentArtifact(
@@ -65,8 +65,8 @@ class DemoAgent:
         )
 
 
-class RegistryAndCoordinatorTests(unittest.TestCase):
-    def test_registry_sorts_by_claim_confidence_not_list_order(self):
+class RegistryAndCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_registry_sorts_by_claim_confidence_not_list_order(self):
         low = DemoAgent("LowConfidenceAgent", AgentCapability.UNDERSTANDING, 0.2)
         high = DemoAgent("HighConfidenceAgent", AgentCapability.UNDERSTANDING, 0.9)
         registry = AgentRegistry([low, high])
@@ -76,7 +76,7 @@ class RegistryAndCoordinatorTests(unittest.TestCase):
 
         self.assertEqual([agent.profile.name for agent in candidates], ["HighConfidenceAgent", "LowConfidenceAgent"])
 
-    def test_coordinator_uses_claims_for_open_tasks(self):
+    async def test_coordinator_uses_claims_for_open_tasks(self):
         settings = SimpleNamespace(
             agent_max_rounds=1,
             agent_max_claims_per_round=2,
@@ -100,7 +100,7 @@ class RegistryAndCoordinatorTests(unittest.TestCase):
         ])
         board = CollaborationBlackboard(turn_id="t1", user_input="hello", model_input="hello")
 
-        result = EventDrivenCoordinator(registry, coordinator_agent, settings).run(board)
+        result = await EventDrivenCoordinator(registry, coordinator_agent, settings).run(board)
 
         claimed = [event.actor for event in result.events if event.type == AgentEventType.TASK_CLAIMED]
         self.assertIn("AgentA", claimed)
