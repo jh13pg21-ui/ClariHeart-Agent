@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
 import tempfile
 from pathlib import Path
@@ -10,6 +11,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
+import sqlalchemy as sa
 
 from app.core.config import get_settings
 
@@ -52,7 +54,7 @@ def legacy_schema_matches(database_url: str) -> bool:
         if tables != set(LEGACY_COLUMNS):
             return False
         if engine.dialect.name != "sqlite":
-            return False
+            return _schema_signature(inspector) == _baseline_signature(engine.dialect)
         with tempfile.TemporaryDirectory() as directory:
             reference_url = f"sqlite:///{Path(directory) / 'baseline.db'}"
             command.upgrade(alembic_config(reference_url), BASELINE_REVISION)
@@ -68,13 +70,51 @@ def legacy_schema_matches(database_url: str) -> bool:
 def _schema_signature(inspector) -> dict:
     return {
         table: {
-            "columns": tuple((column["name"], str(column["type"]), column["nullable"], column["default"], column["primary_key"]) for column in inspector.get_columns(table)),
+            "columns": tuple((column["name"], str(column["type"]), column["nullable"], _normalize_default(column["default"]), column["primary_key"]) for column in inspector.get_columns(table)),
             "foreign_keys": tuple(sorted((foreign_key["constrained_columns"], foreign_key["referred_table"], foreign_key["referred_columns"]) for foreign_key in inspector.get_foreign_keys(table))),
             "unique": tuple(sorted(tuple(item["column_names"]) for item in inspector.get_unique_constraints(table))),
             "indexes": tuple(sorted((tuple(item["column_names"]), item["unique"]) for item in inspector.get_indexes(table))),
         }
         for table in sorted(table for table in inspector.get_table_names() if table != "alembic_version")
     }
+
+
+def _baseline_signature(dialect) -> dict:
+    """从 0001 脚本捕获基线定义，不在目标数据库创建任何比较对象。"""
+    path = Path(__file__).resolve().parents[2] / "migrations" / "versions" / "0001_existing_schema_baseline.py"
+    spec = importlib.util.spec_from_file_location("mindbridge_legacy_baseline", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    metadata = sa.MetaData()
+
+    class Recorder:
+        def create_table(self, name, *items):
+            sa.Table(name, metadata, *items)
+
+    module.op = Recorder()
+    module.upgrade()
+    return {
+        table.name: {
+            "columns": tuple((column.name, str(column.type.compile(dialect=dialect)), column.nullable, _default_text(column.server_default), column.primary_key) for column in table.columns),
+            "foreign_keys": tuple(sorted(([foreign_key.parent.name], foreign_key.column.table.name, [foreign_key.column.name]) for foreign_key in table.foreign_keys)),
+            "unique": tuple(sorted(tuple(constraint.columns.keys()) for constraint in table.constraints if isinstance(constraint, sa.UniqueConstraint))),
+            "indexes": tuple(sorted((tuple(index.columns.keys()), index.unique) for index in table.indexes)),
+        }
+        for table in metadata.tables.values()
+    }
+
+
+def _default_text(default) -> str | None:
+    if default is None:
+        return None
+    return str(default.arg).strip("'\"")
+
+
+def _normalize_default(value) -> str | None:
+    if value is None:
+        return None
+    return str(value).strip().strip("()'\\"")
 
 
 def database_revision(database_url: str) -> str | None:
