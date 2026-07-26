@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import sys
 import tempfile
 from pathlib import Path
@@ -16,23 +15,13 @@ from sqlalchemy import create_engine, inspect, text
 import sqlalchemy as sa
 
 from app.core.config import get_settings
+from migrations.legacy_schema import LEGACY_METADATA
 
 
 BASELINE_REVISION = "0001_existing_schema_baseline"
 LEGACY_COLUMNS = {
-    "user_accounts": {"id", "username", "display_name", "password_hash", "roles_csv", "created_at"},
-    "chat_sessions": {"id", "public_id", "title", "user_id", "created_at", "updated_at"},
-    "chat_messages": {"id", "user_id", "session_id", "role", "content", "created_at"},
-    "knowledge_chunks": {"id", "source", "source_index", "content", "embedding_json", "created_at"},
-    "psychological_reports": {"id", "user_id", "session_id", "content", "intent", "emotion", "emotion_score", "risk_level", "confidence", "summary", "created_at"},
-    "risk_cases": {"id", "report_id", "risk_level", "status", "owner", "summary", "handoff_summary", "acknowledged_by", "acknowledged_at", "created_at", "updated_at"},
-    "case_notes": {"id", "case_id", "actor", "note", "created_at"},
-    "alert_records": {"id", "report_id", "channel", "recipient", "status", "message", "created_at"},
-    "excel_records": {"id", "report_id", "file_path", "status", "message", "created_at"},
-    "tool_jobs": {"id", "report_id", "kind", "status", "attempts", "max_attempts", "depends_on_job_id", "run_after", "last_error", "created_at", "updated_at"},
-    "dead_letter_records": {"id", "job_id", "report_id", "kind", "reason", "payload", "created_at"},
-    "agent_run_traces": {"id", "user_id", "session_id", "report_id", "intent", "risk_level", "original_input", "sanitized_input", "memory_brief", "agent_steps_json", "retrieved_knowledge_json", "response_messages_json", "assessment_json", "created_at"},
-    "tool_audit_records": {"id", "job_id", "report_id", "tool_name", "policy", "allowed", "status", "reason", "payload", "created_at", "updated_at"},
+    table.name: set(table.columns.keys())
+    for table in LEGACY_METADATA.tables.values()
 }
 
 
@@ -56,7 +45,7 @@ def legacy_schema_matches(database_url: str) -> bool:
         if tables != set(LEGACY_COLUMNS):
             return False
         if engine.dialect.name != "sqlite":
-            baseline = _baseline_metadata()
+            baseline = LEGACY_METADATA
             if not _schema_layout_matches(inspector, baseline):
                 return False
             with engine.connect() as connection:
@@ -71,9 +60,9 @@ def legacy_schema_matches(database_url: str) -> bool:
                 return not compare_metadata(context, baseline)
         with tempfile.TemporaryDirectory() as directory:
             reference_url = f"sqlite:///{Path(directory) / 'baseline.db'}"
-            command.upgrade(alembic_config(reference_url), BASELINE_REVISION)
             reference_engine = create_engine(reference_url)
             try:
+                LEGACY_METADATA.create_all(reference_engine)
                 return _schema_signature(inspector) == _schema_signature(inspect(reference_engine))
             finally:
                 reference_engine.dispose()
@@ -87,29 +76,53 @@ def _schema_signature(inspector) -> dict:
         primary_keys = set(inspector.get_pk_constraint(table).get("constrained_columns") or ())
         signature[table] = {
             "columns": tuple((column["name"], str(column["type"]), column["nullable"], _normalize_default(column["default"]), column["name"] in primary_keys) for column in inspector.get_columns(table)),
-            "foreign_keys": tuple(sorted((foreign_key["constrained_columns"], foreign_key["referred_table"], foreign_key["referred_columns"]) for foreign_key in inspector.get_foreign_keys(table))),
-            "unique": tuple(sorted(tuple(item["column_names"]) for item in inspector.get_unique_constraints(table))),
-            "indexes": tuple(sorted((tuple(item["column_names"]), bool(item["unique"])) for item in inspector.get_indexes(table))),
+            "foreign_keys": tuple(
+                sorted(
+                    (
+                        tuple(foreign_key["constrained_columns"]),
+                        foreign_key["referred_table"],
+                        tuple(foreign_key["referred_columns"]),
+                        _foreign_key_options_signature(
+                            foreign_key.get("options") or {}
+                        ),
+                    )
+                    for foreign_key in inspector.get_foreign_keys(table)
+                )
+            ),
+            "unique": tuple(
+                sorted(
+                    (
+                        item.get("name") or "",
+                        tuple(item["column_names"]),
+                    )
+                    for item in inspector.get_unique_constraints(table)
+                )
+            ),
+            "indexes": tuple(
+                sorted(
+                    (
+                        item.get("name") or "",
+                        tuple(item["column_names"]),
+                        bool(item["unique"]),
+                    )
+                    for item in inspector.get_indexes(table)
+                )
+            ),
         }
     return signature
 
 
-def _baseline_metadata() -> sa.MetaData:
-    """从 0001 脚本捕获基线定义，不在目标数据库创建任何比较对象。"""
-    path = Path(__file__).resolve().parents[2] / "migrations" / "versions" / "0001_existing_schema_baseline.py"
-    spec = importlib.util.spec_from_file_location("mindbridge_legacy_baseline", path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    metadata = sa.MetaData()
-
-    class Recorder:
-        def create_table(self, name, *items):
-            sa.Table(name, metadata, *items)
-
-    module.op = Recorder()
-    module.upgrade()
-    return metadata
+def _foreign_key_options_signature(options: dict) -> tuple:
+    return tuple(
+        sorted(
+            (
+                str(key).lower(),
+                value.upper() if isinstance(value, str) else value,
+            )
+            for key, value in options.items()
+            if value is not None
+        )
+    )
 
 
 def _schema_layout_matches(inspector, metadata: sa.MetaData) -> bool:

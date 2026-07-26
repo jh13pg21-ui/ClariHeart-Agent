@@ -3,32 +3,37 @@ import subprocess
 import sys
 import unittest
 
-from alembic import command
+from alembic.autogenerate import compare_metadata
+from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, inspect, text
 
-from app.cli.migrate import BASELINE_REVISION, alembic_config
+from app.cli.migrate import _server_default_differs
+from migrations.legacy_schema import LEGACY_METADATA
+from tests.mysql_test_safety import reset_mysql_schema
 
 
 MYSQL_URL = os.environ.get("MINDBRIDGE_TEST_MYSQL_URL")
+ALLOW_DESTRUCTIVE = os.environ.get("MINDBRIDGE_ALLOW_DESTRUCTIVE_DB_TESTS")
 
 
-@unittest.skipUnless(MYSQL_URL, "需要显式设置 MINDBRIDGE_TEST_MYSQL_URL 指向隔离 MySQL")
+@unittest.skipUnless(
+    MYSQL_URL and ALLOW_DESTRUCTIVE == "1",
+    "需要隔离 MySQL URL 及 MINDBRIDGE_ALLOW_DESTRUCTIVE_DB_TESTS=1 双重确认",
+)
 class MySqlMigrationWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine(MYSQL_URL)
-        with self.engine.begin() as connection:
-            connection.execute(text("SET FOREIGN_KEY_CHECKS=0"))
-            for table in inspect(self.engine).get_table_names():
-                connection.execute(text(f"DROP TABLE `{table}`"))
-            connection.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+        try:
+            reset_mysql_schema(self.engine, MYSQL_URL, ALLOW_DESTRUCTIVE)
+        except Exception:
+            self.engine.dispose()
+            raise
 
     def tearDown(self):
         self.engine.dispose()
 
     def _legacy_baseline(self):
-        command.upgrade(alembic_config(MYSQL_URL), BASELINE_REVISION)
-        with self.engine.begin() as connection:
-            connection.execute(text("DROP TABLE alembic_version"))
+        LEGACY_METADATA.create_all(self.engine)
 
     def _upgrade(self):
         environment = os.environ.copy()
@@ -84,3 +89,49 @@ class MySqlMigrationWorkflowTests(unittest.TestCase):
         with self.engine.begin() as connection:
             connection.execute(text("CREATE INDEX ix_unexpected_roles_csv ON user_accounts (roles_csv)"))
         self._assert_rejected_without_version_table()
+
+    def test_mysql_server_default_drift_is_rejected_without_version_table(self):
+        self._legacy_baseline()
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE user_accounts "
+                    "ALTER COLUMN roles_csv SET DEFAULT 'ROLE_USER'"
+                )
+            )
+        self._assert_rejected_without_version_table()
+
+    def test_mysql_head_matches_current_orm_schema(self):
+        result = self._upgrade()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        from app.core.database import Base
+        import app.models.entities  # noqa: F401
+
+        inspector = inspect(self.engine)
+        for table_name, table in Base.metadata.tables.items():
+            actual_columns = tuple(
+                column["name"] for column in inspector.get_columns(table_name)
+            )
+            self.assertEqual(actual_columns, tuple(table.columns.keys()))
+            actual_primary_key = tuple(
+                inspector.get_pk_constraint(table_name).get(
+                    "constrained_columns"
+                )
+                or ()
+            )
+            self.assertEqual(
+                actual_primary_key,
+                tuple(table.primary_key.columns.keys()),
+            )
+
+        with self.engine.connect() as connection:
+            context = MigrationContext.configure(
+                connection,
+                opts={
+                    "compare_type": True,
+                    "compare_server_default": _server_default_differs,
+                    "target_metadata": Base.metadata,
+                },
+            )
+            self.assertEqual(compare_metadata(context, Base.metadata), [])

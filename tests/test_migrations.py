@@ -6,9 +6,10 @@ import unittest
 from pathlib import Path
 
 from alembic import command
-from sqlalchemy import Column, DateTime, Float, Integer, MetaData, String, Table, Text, create_engine, inspect, text
+from sqlalchemy import Column, DateTime, DefaultClause, Float, Integer, MetaData, String, Table, Text, create_engine, inspect, text
 
 from app.cli.migrate import BASELINE_REVISION, alembic_config
+from migrations.legacy_schema import LEGACY_METADATA
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,11 +41,115 @@ def create_legacy_schema(url: str) -> None:
 
 
 def create_exact_legacy_schema(url: str) -> None:
-    command.upgrade(alembic_config(url), BASELINE_REVISION)
     engine = create_engine(url)
-    with engine.begin() as connection:
-        connection.execute(text("DROP TABLE alembic_version"))
-    engine.dispose()
+    try:
+        LEGACY_METADATA.create_all(engine)
+    finally:
+        engine.dispose()
+
+
+def create_legacy_schema_with_server_default_drift(url: str) -> None:
+    metadata = MetaData()
+    for table in LEGACY_METADATA.sorted_tables:
+        table.to_metadata(metadata)
+    metadata.tables["user_accounts"].c.roles_csv.server_default = DefaultClause("ROLE_USER")
+    engine = create_engine(url)
+    try:
+        metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+
+def create_legacy_schema_with_foreign_key_option_drift(url: str) -> None:
+    metadata = MetaData()
+    for table in LEGACY_METADATA.sorted_tables:
+        table.to_metadata(metadata)
+    foreign_key = next(
+        iter(metadata.tables["chat_sessions"].c.user_id.foreign_keys)
+    )
+    foreign_key.constraint.ondelete = "CASCADE"
+    engine = create_engine(url)
+    try:
+        metadata.create_all(engine)
+    finally:
+        engine.dispose()
+
+
+def schema_signature(url: str) -> dict:
+    def normalized_default(value):
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        while (
+            len(normalized) >= 2
+            and normalized[0] == "("
+            and normalized[-1] == ")"
+        ):
+            normalized = normalized[1:-1].strip()
+        if (
+            len(normalized) >= 2
+            and normalized[0] == normalized[-1]
+            and normalized[0] in "'\""
+        ):
+            normalized = normalized[1:-1]
+        return normalized
+
+    engine = create_engine(url)
+    try:
+        inspector = inspect(engine)
+        signature = {}
+        for table in sorted(
+            table
+            for table in inspector.get_table_names()
+            if table != "alembic_version"
+        ):
+            primary_keys = set(
+                inspector.get_pk_constraint(table).get("constrained_columns") or ()
+            )
+            signature[table] = {
+                "columns": tuple(
+                    (
+                        column["name"],
+                        str(column["type"]),
+                        column["nullable"],
+                        normalized_default(column["default"]),
+                        column["name"] in primary_keys,
+                    )
+                    for column in inspector.get_columns(table)
+                ),
+                "foreign_keys": tuple(
+                    sorted(
+                        (
+                            tuple(foreign_key["constrained_columns"]),
+                            foreign_key["referred_table"],
+                            tuple(foreign_key["referred_columns"]),
+                        )
+                        for foreign_key in inspector.get_foreign_keys(table)
+                    )
+                ),
+                "unique": tuple(
+                    sorted(
+                        (
+                            item["name"],
+                            tuple(item["column_names"]),
+                        )
+                        for item in inspector.get_unique_constraints(table)
+                    )
+                ),
+                "indexes": tuple(
+                    sorted(
+                        (
+                            item["name"],
+                            tuple(item["column_names"]),
+                            bool(item["unique"]),
+                        )
+                        for item in inspector.get_indexes(table)
+                    )
+                ),
+            }
+        return signature
+    finally:
+        engine.dispose()
 
 
 def run_upgrade(url: str) -> subprocess.CompletedProcess[str]:
@@ -65,6 +170,7 @@ class MigrationWorkflowTests(unittest.TestCase):
         self.empty_url = f"sqlite:///{Path(self.tempdir.name) / 'empty.db'}"
         self.legacy_url = f"sqlite:///{Path(self.tempdir.name) / 'legacy.db'}"
         self.unknown_url = f"sqlite:///{Path(self.tempdir.name) / 'unknown.db'}"
+        self.reference_url = f"sqlite:///{Path(self.tempdir.name) / 'reference.db'}"
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -111,24 +217,68 @@ class MigrationWorkflowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("alembic_version", inspect(create_engine(self.legacy_url)).get_table_names())
 
+    def test_legacy_index_drift_is_rejected_without_version_table(self):
+        create_exact_legacy_schema(self.legacy_url)
+        engine = create_engine(self.legacy_url)
+        with engine.begin() as connection:
+            connection.execute(text("DROP INDEX ix_tool_jobs_status"))
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_wrong_tool_jobs_status "
+                    "ON tool_jobs (status)"
+                )
+            )
+        result = run_upgrade(self.legacy_url)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("alembic_version", inspect(engine).get_table_names())
+        engine.dispose()
+
+    def test_legacy_server_default_drift_is_rejected_without_version_table(self):
+        create_legacy_schema_with_server_default_drift(self.legacy_url)
+        result = run_upgrade(self.legacy_url)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(
+            "alembic_version",
+            inspect(create_engine(self.legacy_url)).get_table_names(),
+        )
+
+    def test_legacy_foreign_key_option_drift_is_rejected_without_version_table(self):
+        create_legacy_schema_with_foreign_key_option_drift(self.legacy_url)
+        result = run_upgrade(self.legacy_url)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn(
+            "alembic_version",
+            inspect(create_engine(self.legacy_url)).get_table_names(),
+        )
+
     def test_upgrade_is_idempotent(self):
         self.assertEqual(run_upgrade(self.empty_url).returncode, 0)
         self.assertEqual(run_upgrade(self.empty_url).returncode, 0)
         with create_engine(self.empty_url).connect() as connection:
             self.assertEqual(connection.execute(text("SELECT COUNT(*) FROM alembic_version")).scalar_one(), 1)
 
-    def test_migration_head_matches_orm_new_tables_and_foreign_keys(self):
+    def test_baseline_revision_matches_frozen_historical_schema(self):
+        command.upgrade(alembic_config(self.empty_url), BASELINE_REVISION)
+        create_exact_legacy_schema(self.reference_url)
+        self.assertEqual(
+            schema_signature(self.empty_url),
+            schema_signature(self.reference_url),
+        )
+
+    def test_migration_head_matches_current_orm_schema(self):
         self.assertEqual(run_upgrade(self.empty_url).returncode, 0)
         from app.core.database import Base
         import app.models.entities  # noqa: F401
 
-        inspector = inspect(create_engine(self.empty_url))
-        for name in NEW_TABLES:
-            self.assertIn(name, Base.metadata.tables)
-            self.assertIn(name, inspector.get_table_names())
-            orm_foreign_keys = {foreign_key.target_fullname for foreign_key in Base.metadata.tables[name].foreign_keys}
-            database_foreign_keys = {foreign_key["referred_table"] + "." + foreign_key["referred_columns"][0] for foreign_key in inspector.get_foreign_keys(name)}
-            self.assertEqual(database_foreign_keys, orm_foreign_keys)
+        reference_engine = create_engine(self.reference_url)
+        try:
+            Base.metadata.create_all(reference_engine)
+        finally:
+            reference_engine.dispose()
+        self.assertEqual(
+            schema_signature(self.empty_url),
+            schema_signature(self.reference_url),
+        )
 
     def test_check_returns_zero_only_at_head(self):
         self.assertNotEqual(run_check(self.empty_url).returncode, 0)
