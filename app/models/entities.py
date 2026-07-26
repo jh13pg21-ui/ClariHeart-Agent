@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -22,6 +22,9 @@ class UserAccount(Base):
     password_hash: Mapped[str] = mapped_column(String(128))
     roles_csv: Mapped[str] = mapped_column(String(256), default="ROLE_USER")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    password_algorithm: Mapped[str] = mapped_column(String(32), default="legacy_sha256", server_default="legacy_sha256")
+    must_reset_password: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     sessions: Mapped[list["ChatSession"]] = relationship(back_populates="user")
 
@@ -201,4 +204,57 @@ class ToolAuditRecord(Base):
     payload: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class AuthSession(Base):
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user_accounts.id"), index=True)
+    session_token_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    issued_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class SecurityAuditRecord(Base):
+    __tablename__ = "security_audit_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("user_accounts.id"), nullable=True, index=True)
+    actor: Mapped[str] = mapped_column(String(128))
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    resource_type: Mapped[str] = mapped_column(String(64))
+    resource_id: Mapped[str] = mapped_column(String(128), default="")
+    ip_address: Mapped[str] = mapped_column(String(64), default="")
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(128), index=True)
+    aggregate_type: Mapped[str] = mapped_column(String(64))
+    aggregate_id: Mapped[str] = mapped_column(String(128), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class ProcessedMessage(Base):
+    __tablename__ = "processed_messages"
+    __table_args__ = (UniqueConstraint("consumer", "message_id", name="uq_processed_messages_consumer_message"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    consumer: Mapped[str] = mapped_column(String(128))
+    message_id: Mapped[str] = mapped_column(String(128))
+    processed_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 

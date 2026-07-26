@@ -10,7 +10,15 @@ from app.services.knowledge import KnowledgeService
 
 
 def create_schema() -> None:
+    """仅供测试 Harness 显式建表；生产启动改由迁移管理。"""
     Base.metadata.create_all(bind=engine)
+
+
+def ensure_database_current() -> None:
+    """在开始提供服务前确认 Alembic 已处于 head。"""
+    from app.cli.migrate import check
+
+    check(get_settings().database_url)
 
 
 def seed_data(db: Session) -> None:
