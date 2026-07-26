@@ -8,7 +8,9 @@ import tempfile
 from pathlib import Path
 
 from alembic import command
+from alembic.autogenerate import compare_metadata
 from alembic.config import Config
+from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 import sqlalchemy as sa
@@ -54,7 +56,19 @@ def legacy_schema_matches(database_url: str) -> bool:
         if tables != set(LEGACY_COLUMNS):
             return False
         if engine.dialect.name != "sqlite":
-            return _schema_signature(inspector) == _baseline_signature(engine.dialect)
+            baseline = _baseline_metadata()
+            if not _schema_layout_matches(inspector, baseline):
+                return False
+            with engine.connect() as connection:
+                context = MigrationContext.configure(
+                    connection,
+                    opts={
+                        "compare_type": True,
+                        "compare_server_default": _server_default_differs,
+                        "target_metadata": baseline,
+                    },
+                )
+                return not compare_metadata(context, baseline)
         with tempfile.TemporaryDirectory() as directory:
             reference_url = f"sqlite:///{Path(directory) / 'baseline.db'}"
             command.upgrade(alembic_config(reference_url), BASELINE_REVISION)
@@ -68,18 +82,19 @@ def legacy_schema_matches(database_url: str) -> bool:
 
 
 def _schema_signature(inspector) -> dict:
-    return {
-        table: {
-            "columns": tuple((column["name"], str(column["type"]), column["nullable"], _normalize_default(column["default"]), column["primary_key"]) for column in inspector.get_columns(table)),
+    signature = {}
+    for table in sorted(table for table in inspector.get_table_names() if table != "alembic_version"):
+        primary_keys = set(inspector.get_pk_constraint(table).get("constrained_columns") or ())
+        signature[table] = {
+            "columns": tuple((column["name"], str(column["type"]), column["nullable"], _normalize_default(column["default"]), column["name"] in primary_keys) for column in inspector.get_columns(table)),
             "foreign_keys": tuple(sorted((foreign_key["constrained_columns"], foreign_key["referred_table"], foreign_key["referred_columns"]) for foreign_key in inspector.get_foreign_keys(table))),
             "unique": tuple(sorted(tuple(item["column_names"]) for item in inspector.get_unique_constraints(table))),
-            "indexes": tuple(sorted((tuple(item["column_names"]), item["unique"]) for item in inspector.get_indexes(table))),
+            "indexes": tuple(sorted((tuple(item["column_names"]), bool(item["unique"])) for item in inspector.get_indexes(table))),
         }
-        for table in sorted(table for table in inspector.get_table_names() if table != "alembic_version")
-    }
+    return signature
 
 
-def _baseline_signature(dialect) -> dict:
+def _baseline_metadata() -> sa.MetaData:
     """从 0001 脚本捕获基线定义，不在目标数据库创建任何比较对象。"""
     path = Path(__file__).resolve().parents[2] / "migrations" / "versions" / "0001_existing_schema_baseline.py"
     spec = importlib.util.spec_from_file_location("mindbridge_legacy_baseline", path)
@@ -94,27 +109,54 @@ def _baseline_signature(dialect) -> dict:
 
     module.op = Recorder()
     module.upgrade()
-    return {
-        table.name: {
-            "columns": tuple((column.name, str(column.type.compile(dialect=dialect)), column.nullable, _default_text(column.server_default), column.primary_key) for column in table.columns),
-            "foreign_keys": tuple(sorted(([foreign_key.parent.name], foreign_key.column.table.name, [foreign_key.column.name]) for foreign_key in table.foreign_keys)),
-            "unique": tuple(sorted(tuple(constraint.columns.keys()) for constraint in table.constraints if isinstance(constraint, sa.UniqueConstraint))),
-            "indexes": tuple(sorted((tuple(index.columns.keys()), index.unique) for index in table.indexes)),
-        }
-        for table in metadata.tables.values()
-    }
+    return metadata
 
 
-def _default_text(default) -> str | None:
-    if default is None:
+def _schema_layout_matches(inspector, metadata: sa.MetaData) -> bool:
+    for table_name, table in metadata.tables.items():
+        if tuple(column["name"] for column in inspector.get_columns(table_name)) != tuple(table.columns.keys()):
+            return False
+        actual_primary_key = tuple(inspector.get_pk_constraint(table_name).get("constrained_columns") or ())
+        if actual_primary_key != tuple(table.primary_key.columns.keys()):
+            return False
+    return True
+
+
+def _server_default_differs(
+    context,
+    inspected_column,
+    metadata_column,
+    inspected_default,
+    metadata_default,
+    rendered_metadata_default,
+) -> bool:
+    return _normalize_server_default(inspected_default, metadata_column.type) != _normalize_server_default(
+        rendered_metadata_default, metadata_column.type
+    )
+
+
+def _normalize_server_default(value, column_type) -> str | None:
+    if value is None:
         return None
-    return str(default.arg).strip("'\"")
+    normalized = str(value).strip()
+    while len(normalized) >= 2 and normalized[0] == "(" and normalized[-1] == ")":
+        normalized = normalized[1:-1].strip()
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in "'\"":
+        normalized = normalized[1:-1]
+    if isinstance(column_type, sa.Boolean):
+        return {
+            "1": "true",
+            "true": "true",
+            "0": "false",
+            "false": "false",
+        }.get(normalized.lower(), normalized.lower())
+    return normalized
 
 
 def _normalize_default(value) -> str | None:
     if value is None:
         return None
-    return str(value).strip().strip("()'\\"")
+    return str(value).strip().strip("()'")
 
 
 def database_revision(database_url: str) -> str | None:
