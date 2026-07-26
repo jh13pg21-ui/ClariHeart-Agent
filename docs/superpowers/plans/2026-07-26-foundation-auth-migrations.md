@@ -73,6 +73,7 @@ Commit: `fix: restore report and audit service endpoints`
 - Create: `migrations/script.py.mako`
 - Create: `migrations/versions/0001_existing_schema_baseline.py`
 - Create: `migrations/versions/0002_auth_audit_outbox_schema.py`
+- Modify: `app/models/entities.py`
 - Create: `app/cli/migrate.py`
 - Modify: `app/main.py`
 - Modify: `app/core/bootstrap.py`
@@ -112,6 +113,7 @@ op.add_column("user_accounts", sa.Column("disabled", sa.Boolean(), nullable=Fals
 ```
 
 并创建 `auth_sessions`、`security_audit_records`、`outbox_events`、`processed_messages`。
+同时在 `app/models/entities.py` 中增加对应 ORM 实体，字段名和约束必须与迁移保持一致，供后续认证、审计和 Outbox 计划直接复用。
 
 - [ ] **Step 4: 实现安全基线识别**
 
