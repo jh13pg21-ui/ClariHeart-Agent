@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.uploads/
+data/*.db
+data/*.sqlite
+data/*.xlsx
+data/chroma/
+data/chroma-snapshots/
+target/
+dist/
+*.gguf
+*.gguf.zip
+*.zip
+/python
+.DS_Store
