@@ -237,13 +237,16 @@ class OutboxEvent(Base):
     __tablename__ = "outbox_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), unique=True, index=True)
     event_type: Mapped[str] = mapped_column(String(128), index=True)
     aggregate_type: Mapped[str] = mapped_column(String(64))
     aggregate_id: Mapped[str] = mapped_column(String(128), index=True)
     payload_json: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    status: Mapped[str] = mapped_column(String(32), default="PENDING", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     available_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)

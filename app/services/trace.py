@@ -25,6 +25,8 @@ class AgentTraceService:
         memory_brief: str,
         agent_run: AgentRunResult,
         report_id: int | None,
+        *,
+        commit: bool = True,
     ) -> AgentRunTrace:
         trace = AgentRunTrace(
             user_id=user.id,
@@ -41,8 +43,10 @@ class AgentTraceService:
             assessment_json=_json(agent_run.assessment or {}),
         )
         self.db.add(trace)
-        self.db.commit()
-        self.db.refresh(trace)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(trace)
         return trace
 
 

@@ -24,7 +24,7 @@ class ToolOrchestrationService:
         self.db = db
         self.settings = settings
 
-    def write_excel(self, report: PsychologicalReport) -> ExcelRecord:
+    def write_excel(self, report: PsychologicalReport, *, commit: bool = True) -> ExcelRecord:
         existing = (
             self.db.query(ExcelRecord)
             .filter(ExcelRecord.report_id == report.id, ExcelRecord.status == ToolStatus.SUCCESS.value)
@@ -43,14 +43,20 @@ class ToolOrchestrationService:
                 sheet = workbook.active
                 sheet.title = "MindBridge Risk Ledger"
                 sheet.append(["reportId", "riskLevel", "emotion", "confidence", "summary", "createdAt"])
-            sheet.append([report.id, report.risk_level, report.emotion, report.confidence, report.summary, report.created_at.isoformat()])
+            report_ids = {
+                str(row[0])
+                for row in sheet.iter_rows(min_row=2, values_only=True)
+                if row and row[0] is not None
+            }
+            if str(report.id) not in report_ids:
+                sheet.append([report.id, report.risk_level, report.emotion, report.confidence, report.summary, report.created_at.isoformat()])
             workbook.save(path)
         record = ExcelRecord(report_id=report.id, file_path=str(path), status=ToolStatus.SUCCESS.value, message="Excel 台账已写入")
         self.db.add(record)
-        self.db.commit()
+        self._finish_write(commit)
         return record
 
-    def create_case(self, report: PsychologicalReport) -> RiskCase:
+    def create_case(self, report: PsychologicalReport, *, commit: bool = True) -> RiskCase:
         existing = self.db.query(RiskCase).filter(RiskCase.report_id == report.id).first()
         if existing is not None:
             return existing
@@ -64,19 +70,19 @@ class ToolOrchestrationService:
             handoff_summary=MindBridgeSkillLibrary.counselor_handoff_summary(report, user),
         )
         self.db.add(case)
-        self.db.commit()
+        self._finish_write(commit)
         return case
 
-    def send_case_alert(self, case: RiskCase) -> AlertRecord:
+    def send_case_alert(self, case: RiskCase, *, commit: bool = True) -> AlertRecord:
         report = self.db.get(PsychologicalReport, case.report_id)
         if report is None:
             raise RuntimeError(f"report {case.report_id} not found")
-        record = self.notify(report, case)
+        record = self.notify(report, case, commit=False)
         if record.status == ToolStatus.SUCCESS.value and case.status == RiskCaseStatus.OPEN.value:
             case.status = RiskCaseStatus.ALERT_SENT.value
         case.updated_at = datetime.utcnow()
         self.db.add(case)
-        self.db.commit()
+        self._finish_write(commit)
         return record
 
     def acknowledge_case(self, case_id: int, actor: str, note: str = "") -> RiskCase:
@@ -103,7 +109,8 @@ class ToolOrchestrationService:
         self.db.commit()
         return record
 
-    def notify(self, report: PsychologicalReport, case: RiskCase | None = None) -> AlertRecord:
+    def notify(self, report: PsychologicalReport, case: RiskCase | None = None, *, commit: bool = True) -> AlertRecord:
+        self._notification_commit = commit
         existing = (
             self.db.query(AlertRecord)
             .filter(AlertRecord.report_id == report.id, AlertRecord.status == ToolStatus.SUCCESS.value)
@@ -146,7 +153,15 @@ class ToolOrchestrationService:
             )
         return self._save_alert(report, recipient, ToolStatus.SUCCESS.value, f"高风险预警邮件已发送：reportId={report.id}")
 
-    def _save_alert(self, report: PsychologicalReport, recipient: str, status: str, message: str) -> AlertRecord:
+    def _save_alert(
+        self,
+        report: PsychologicalReport,
+        recipient: str,
+        status: str,
+        message: str,
+        *,
+        commit: bool | None = None,
+    ) -> AlertRecord:
         record = AlertRecord(
             report_id=report.id,
             channel="email",
@@ -155,8 +170,16 @@ class ToolOrchestrationService:
             message=message,
         )
         self.db.add(record)
-        self.db.commit()
+        self._finish_write(
+            getattr(self, "_notification_commit", True) if commit is None else commit
+        )
         return record
+
+    def _finish_write(self, commit: bool) -> None:
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
 
     def _add_case_note(self, case_id: int, actor: str, note: str) -> CaseNote:
         if not note:

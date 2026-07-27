@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     rag_eval_exit_after_run: bool = False
     excel_path: str = "data/mindbridge-risk-ledger.xlsx"
     redis_url: str = "redis://127.0.0.1:6379/0"
+    rabbitmq_url: str = "amqp://mindbridge:mindbridge@127.0.0.1:5672//"
+    rabbitmq_exchange: str = "mindbridge.events"
+    celery_result_backend: str = "redis://127.0.0.1:6379/1"
+    celery_general_queue: str = "mindbridge.general"
+    celery_alert_queue: str = "mindbridge.alert"
+    outbox_publisher_batch_size: int = 50
+    outbox_publisher_poll_seconds: float = 1.0
     redis_memory_ttl_seconds: int = 86400
     redis_memory_max_messages: int = 40
     redis_socket_timeout_seconds: float = 2.0

@@ -8,15 +8,14 @@ from sqlalchemy.orm import Session
 from app.agents.factory import create_agent_runtime
 from app.agents.result import AgentStep
 from app.core.config import Settings
-from app.core.enums import IntentType, MessageRole
+from app.core.enums import IntentType, MessageRole, RiskLevel
 from app.models.entities import ChatMessage, ChatSession, PsychologicalReport, UserAccount
 from app.schemas.dtos import AiMessage, ChatRequest
 from app.services.assessment import PsychologyAssessment
 from app.services.knowledge import SearchResult
-from app.services.mcp_client import MindBridgeMcpToolClient
 from app.services.memory import RedisShortTermMemoryStore
+from app.services.outbox import OutboxService
 from app.services.privacy import PrivacySanitizer
-from app.services.tool_queue import ToolQueueService
 from app.services.trace import AgentTraceService
 from app.services.output_safety import OutputSafetyDecision
 
@@ -73,19 +72,27 @@ class MindBridgeAgentHarness:
             original_input,
             model_input,
         )
-        self.save_message(user, session, MessageRole.USER, original_input)
-
-        report = self._create_report(user, session, original_input, agent_run)
         risk_level = agent_run.risk_level.value
-        trace = AgentTraceService(self.db).save_run(
-            user=user,
-            session=session,
-            original_input=original_input,
-            sanitized_input=model_input,
-            memory_brief=agent_run.memory_brief,
-            agent_run=agent_run,
-            report_id=report.id if report is not None else None,
-        )
+        try:
+            self._add_message(user, session, MessageRole.USER, original_input)
+            report = self._create_report(user, session, original_input, agent_run)
+            trace = AgentTraceService(self.db).save_run(
+                user=user,
+                session=session,
+                original_input=original_input,
+                sanitized_input=model_input,
+                memory_brief=agent_run.memory_brief,
+                agent_run=agent_run,
+                report_id=report.id if report is not None else None,
+                commit=False,
+            )
+            if report is not None:
+                self._add_report_events(report)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        self.memory.append(session.public_id, MessageRole.USER.value, original_input)
         tool_plan = AgentToolPlan(report_id=report.id if report is not None else None, risk_level=risk_level)
         return AgentHarnessOutcome(
             session=session,
@@ -107,20 +114,15 @@ class MindBridgeAgentHarness:
     def save_assistant_message(self, user: UserAccount, session: ChatSession, content: str) -> None:
         self.save_message(user, session, MessageRole.ASSISTANT, content)
 
-    async def dispatch_tools(self, tool_plan: AgentToolPlan) -> list[str]:
-        if tool_plan.report_id is None:
-            return []
-        if self.settings.tool_queue_enabled:
-            ToolQueueService(self.db, self.settings).enqueue_report(tool_plan.report_id, tool_plan.risk_level)
-            return ["queued"]
-        return await MindBridgeMcpToolClient(self.settings).handle_report(tool_plan.report_id, tool_plan.risk_level)
-
     def save_message(self, user: UserAccount, session: ChatSession, role: MessageRole, content: str) -> None:
+        self._add_message(user, session, role, content)
+        self.db.commit()
+        self.memory.append(session.public_id, role.value, content)
+
+    def _add_message(self, user: UserAccount, session: ChatSession, role: MessageRole, content: str) -> None:
         self.db.add(ChatMessage(user_id=user.id, session_id=session.id, role=role.value, content=content))
         session.touch()
         self.db.add(session)
-        self.db.commit()
-        self.memory.append(session.public_id, role.value, content)
 
     def _resolve_session(self, user: UserAccount, public_id: str | None, text: str) -> ChatSession:
         if public_id:
@@ -130,8 +132,7 @@ class MindBridgeAgentHarness:
             return session
         session = ChatSession(public_id=uuid.uuid4().hex, user_id=user.id, title=text[:36])
         self.db.add(session)
-        self.db.commit()
-        self.db.refresh(session)
+        self.db.flush()
         return session
 
     def _create_report(self, user: UserAccount, session: ChatSession, text: str, agent_run) -> PsychologicalReport | None:
@@ -149,6 +150,25 @@ class MindBridgeAgentHarness:
             summary=agent_run.assessment.summary,
         )
         self.db.add(report)
-        self.db.commit()
-        self.db.refresh(report)
+        self.db.flush()
         return report
+
+    def _add_report_events(self, report: PsychologicalReport) -> None:
+        payload = {"reportId": report.id, "riskLevel": report.risk_level}
+        OutboxService.add_event(
+            self.db,
+            "report.excel",
+            "report",
+            report.id,
+            payload,
+            f"report.excel:{report.id}",
+        )
+        if report.risk_level in {RiskLevel.MEDIUM.value, RiskLevel.HIGH.value}:
+            OutboxService.add_event(
+                self.db,
+                "case.create",
+                "report",
+                report.id,
+                payload,
+                f"case.create:{report.id}",
+            )

@@ -86,8 +86,7 @@ class ToolGovernanceService:
             ),
         )
         self.db.add(record)
-        self.db.commit()
-        self.db.refresh(record)
+        self.db.flush()
         return record
 
     def require_allowed(self, job: ToolJob, report: PsychologicalReport | None) -> None:
@@ -102,7 +101,7 @@ class ToolGovernanceService:
             record.payload = _json(payload)
         record.updated_at = datetime.utcnow()
         self.db.add(record)
-        self.db.commit()
+        self.db.flush()
         return record
 
 

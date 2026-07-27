@@ -9,7 +9,6 @@ from app.api.routes import router
 from app.core.bootstrap import ensure_database_current
 from app.core.config import get_settings
 from app.core.security import csrf_is_valid
-from app.services.tool_queue import get_tool_queue_worker
 
 
 def create_app(settings=None) -> FastAPI:
@@ -35,15 +34,6 @@ def create_app(settings=None) -> FastAPI:
     def startup() -> None:
         runtime_settings.validate_auth_configuration()
         ensure_database_current()
-        worker = get_tool_queue_worker(runtime_settings)
-        worker.start()
-        app.state.tool_queue_worker = worker
-
-    @app.on_event("shutdown")
-    def shutdown() -> None:
-        worker = getattr(app.state, "tool_queue_worker", None)
-        if worker is not None:
-            worker.stop()
 
     app.include_router(auth_router)
     app.include_router(router)

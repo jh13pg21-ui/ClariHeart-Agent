@@ -5,6 +5,7 @@ alembic==1.14.1
 pymysql==1.1.1
 cryptography>=42.0.0
 redis==5.2.1
+celery==5.4.0
 pydantic-settings==2.7.1
 chromadb==0.5.23
 python-multipart==0.0.20
