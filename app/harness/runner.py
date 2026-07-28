@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--suite",
         action="append",
-        choices=["risk", "routing", "skills", "rag", "api", "tool-queue", "all"],
+        choices=["risk", "routing", "skills", "rag", "api", "all"],
         default=None,
         help="Harness suite to run. Can be supplied multiple times.",
     )
@@ -122,7 +122,6 @@ def configure_environment() -> None:
     os.environ["AGENT_FRAMEWORK"] = "event_driven_multi_agent"
     os.environ["KNOWLEDGE_VECTOR_ENABLED"] = "false"
     os.environ["KNOWLEDGE_VECTOR_REQUIRED"] = "false"
-    os.environ["TOOL_QUEUE_ENABLED"] = "false"
     os.environ["ALERT_EMAIL_DELIVERY_MODE"] = "log"
     os.environ["EXCEL_PATH"] = str((target_dir / "mindbridge-risk-ledger.xlsx").as_posix())
     os.environ["RAG_EVAL_OUTPUT"] = str((target_dir / "rag-eval-report.json").as_posix())
@@ -178,7 +177,6 @@ def resolve_suites(requested: list[str] | None) -> list[tuple[str, Callable[[Har
         ("Standard Skills Harness", run_standard_skills_harness),
         ("RAG Harness", run_rag_harness),
         ("API Harness", run_api_harness),
-        ("Tool Queue Harness", run_tool_queue_harness),
     ]
     if not requested or "all" in requested:
         return all_suites
@@ -189,7 +187,6 @@ def resolve_suites(requested: list[str] | None) -> list[tuple[str, Callable[[Har
         "skills": "Standard Skills Harness",
         "rag": "RAG Harness",
         "api": "API Harness",
-        "tool-queue": "Tool Queue Harness",
     }
     names = {aliases[item] for item in selected}
     return [suite for suite in all_suites if suite[0] in names]
@@ -209,12 +206,11 @@ def run_check(name: str, fn: Callable[[HarnessContext], dict], context: HarnessC
 
 
 def run_risk_safety_harness(context: HarnessContext) -> dict:
-    from app.core.enums import RiskLevel, ToolJobKind
-    from app.models.entities import PsychologicalReport, ToolJob, UserAccount
+    from app.core.enums import RiskLevel
+    from app.models.entities import OutboxEvent, PsychologicalReport, UserAccount
     from app.schemas.dtos import ChatRequest
     from app.services.chat import ChatService
 
-    context.settings.tool_queue_enabled = True
     db = context.session()
     observed = []
     try:
@@ -266,23 +262,24 @@ def run_risk_safety_harness(context: HarnessContext) -> dict:
                 expected_risk = case.get("expects_risk")
                 if expected_risk:
                     expect(report.risk_level == expected_risk, f"{case['id']} expected {expected_risk}, got {report.risk_level}")
-                jobs = db.query(ToolJob).filter(ToolJob.report_id == report.id).all()
-                has_alert = any(job.kind == ToolJobKind.ALERT_SEND.value for job in jobs)
-                expect(has_alert == case["expects_alert"], f"{case['id']} alert job expectation failed")
+                outbox_events = (
+                    db.query(OutboxEvent)
+                    .filter(OutboxEvent.aggregate_id == str(report.id))
+                    .all()
+                )
                 expect(
-                    any(job.kind == ToolJobKind.EXCEL_REPORT.value for job in jobs),
-                    f"{case['id']} did not enqueue Excel report job",
+                    any(event.event_type == "report.excel" for event in outbox_events),
+                    f"{case['id']} did not create Excel report outbox event",
                 )
                 if case["expects_alert"]:
                     expect(
-                        any(job.kind == ToolJobKind.CASE_CREATE.value for job in jobs),
-                        f"{case['id']} did not enqueue case creation job",
+                        any(event.event_type == "case.create" for event in outbox_events),
+                        f"{case['id']} did not create case outbox event",
                     )
             forbidden = ["风险等级", "报告ID", "emotionScore", "HIGH_RISK"]
             expect(not any(term in token_text for term in forbidden), f"{case['id']} exposed backend risk metadata")
             observed.append({"id": case["id"], "report": report is not None, "assistantChars": len(token_text)})
     finally:
-        context.settings.tool_queue_enabled = False
         db.close()
     return {"cases": observed}
 
@@ -471,7 +468,6 @@ def run_api_harness(context: HarnessContext) -> dict:
 
     from app.main import create_app
 
-    context.settings.tool_queue_enabled = False
     app = create_app()
     student_auth = basic_auth("student", "student123")
     admin_auth = basic_auth("admin", "admin123")
@@ -523,101 +519,6 @@ def run_api_harness(context: HarnessContext) -> dict:
     return observed
 
 
-def run_tool_queue_harness(context: HarnessContext) -> dict:
-    from app.core.enums import EmotionLabel, IntentType, RiskCaseStatus, RiskLevel, ToolJobKind, ToolJobStatus, ToolStatus
-    from app.models.entities import DeadLetterRecord, PsychologicalReport, ToolJob, ChatSession, UserAccount
-    from app.services.tool_queue import RateLimiter, ToolQueueService, ToolQueueWorker
-    from app.services.tools import ToolOrchestrationService
-
-    context.settings.tool_queue_enabled = True
-    db = context.session()
-    worker = ToolQueueWorker(context.settings)
-    try:
-        user = db.query(UserAccount).filter(UserAccount.username == "student").one()
-        session = ChatSession(public_id=uuid.uuid4().hex, user_id=user.id, title="tool-queue-harness")
-        db.add(session)
-        db.commit()
-        db.refresh(session)
-        report = PsychologicalReport(
-            user_id=user.id,
-            session_id=session.id,
-            content="我不想活了，想结束生命。",
-            intent=IntentType.RISK.value,
-            emotion=EmotionLabel.HIGH_RISK.value,
-            emotion_score=4.0,
-            risk_level=RiskLevel.HIGH.value,
-            confidence=0.95,
-            summary="harness high risk case",
-        )
-        db.add(report)
-        db.commit()
-        db.refresh(report)
-
-        jobs = ToolQueueService(db, context.settings).enqueue_report(report.id, report.risk_level)
-        expect(len(jobs) == 3, f"expected 3 jobs for high risk report, got {len(jobs)}")
-        excel_job = next(job for job in jobs if job.kind == ToolJobKind.EXCEL_REPORT.value)
-        case_job = next(job for job in jobs if job.kind == ToolJobKind.CASE_CREATE.value)
-        alert_job = next(job for job in jobs if job.kind == ToolJobKind.ALERT_SEND.value)
-        expect(alert_job.depends_on_job_id == case_job.id, "alert job does not depend on case creation job")
-        expect(not worker._dependency_ready(db, alert_job), "alert dependency should not be ready before case creation success")
-
-        tools = ToolOrchestrationService(db, context.settings)
-        excel_record = tools.write_excel(report)
-        expect(excel_record.status == ToolStatus.SUCCESS.value, f"Excel write failed: {excel_record.message}")
-        second_excel_record = tools.write_excel(report)
-        expect(second_excel_record.id == excel_record.id, "Excel write is not idempotent")
-
-        case_record = tools.create_case(report)
-        second_case_record = tools.create_case(report)
-        expect(second_case_record.id == case_record.id, "case creation is not idempotent")
-
-        case_job.status = ToolJobStatus.SUCCESS.value
-        db.add(case_job)
-        db.commit()
-        expect(worker._dependency_ready(db, alert_job), "alert dependency was not ready after case creation success")
-
-        alert_record = tools.send_case_alert(case_record)
-        expect(alert_record.status == ToolStatus.SUCCESS.value, f"alert notify failed: {alert_record.message}")
-        db.refresh(case_record)
-        expect(case_record.status == RiskCaseStatus.ALERT_SENT.value, "case did not move to ALERT_SENT after alert")
-
-        limiter = RateLimiter(1)
-        first_allowed, _ = limiter.allow()
-        second_allowed, retry_after = limiter.allow()
-        expect(first_allowed, "rate limiter rejected first event")
-        expect(not second_allowed and retry_after > 0, "rate limiter did not throttle second event")
-
-        dead_job = ToolJob(
-            report_id=report.id,
-            kind=ToolJobKind.EXCEL_REPORT.value,
-            status=ToolJobStatus.RUNNING.value,
-            attempts=3,
-            max_attempts=3,
-        )
-        db.add(dead_job)
-        db.commit()
-        db.refresh(dead_job)
-        worker._fail_or_dead_letter(db, dead_job.id, RuntimeError("harness failure"))
-        db.refresh(dead_job)
-        dead_letter = db.query(DeadLetterRecord).filter(DeadLetterRecord.job_id == dead_job.id).first()
-        expect(dead_job.status == ToolJobStatus.DEAD.value, "max-attempt job did not move to DEAD")
-        expect(dead_letter is not None, "dead letter record was not created")
-
-        return {
-            "reportId": report.id,
-            "excelJobId": excel_job.id,
-            "caseJobId": case_job.id,
-            "alertJobId": alert_job.id,
-            "caseId": case_record.id,
-            "excelPath": excel_record.file_path,
-            "deadLetterId": dead_letter.id,
-        }
-    finally:
-        worker.stop()
-        context.settings.tool_queue_enabled = False
-        db.close()
-
-
 def collect_chat_stream(service, user, request) -> tuple[list[dict], str]:
     async def collect() -> list[dict]:
         events = []
@@ -626,7 +527,11 @@ def collect_chat_stream(service, user, request) -> tuple[list[dict], str]:
         return events
 
     events = asyncio.run(collect())
-    assistant = "".join(event["data"].get("content", "") for event in events if event["event"] == "token")
+    assistant = "".join(
+        event["data"].get("content", "")
+        for event in events
+        if event["event"] in {"token", "message"}
+    )
     return events, assistant
 
 

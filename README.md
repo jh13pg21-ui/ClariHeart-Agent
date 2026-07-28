@@ -3,7 +3,7 @@
 ## 核心能力
 
 - 学生端 SSE 流式聊天，前端可展示打字机式输出。
-- Basic Auth 登录，支持学生和管理员角色隔离。
+- Argon2id 密码哈希与 JWT HttpOnly Cookie 登录，支持学生和管理员角色隔离、刷新令牌轮换与 CSRF 防护。
 - 事件驱动多 Agent 协作 runtime：Coordinator、Understanding、Safety、Context、Response 通过共享黑板、任务认领和安全审查协作。
 - 动态路由 RAG：先判断 `CHAT / CONSULT / RISK`，普通问题不查知识库，咨询和风险场景才进入检索增强。
 - Chroma 向量 RAG 知识库：支持 Markdown、txt、PDF 文件上传，自动切块，使用 `text-embedding-3-small` 写入向量库，并与 BM25 关键词召回融合后进入本地 reranker；向量不可用时保留本地 BM25 + 词面检索兜底。
@@ -12,7 +12,7 @@
 - 数据闭环：咨询/风险消息完整写入 MySQL，短期上下文写入 Redis，高风险消息写入 Excel 台账并通过邮件发送预警。
 - 本地微调模型接入：支持通过 Ollama 加载 `mindbridge-qwen2.5-7b-ft-q4_k_m.gguf`。
 - OpenAI-compatible API 接入：也可切换到云端模型。
-- MCP 工具服务：暴露 Excel 报告写入和风险通知工具，后端高风险后处理通过 MCP client 调用这些工具。
+- RabbitMQ / Celery 异步后处理：通过事务 Outbox 可靠发布 Excel 台账、个案创建和风险通知任务；MCP 工具服务保留为独立集成入口。
 - RAG 评测：Recall@K、Precision@K、MRR、NDCG@K、HitRate。
 
 ## 技术栈
@@ -32,8 +32,9 @@ RAG：本地知识库切块、OpenAI Embeddings、Chroma 向量库、BM25、分�
 Excel 台账：openpyxl
 邮件预警：SMTP / smtplib
 前端：原生 HTML / CSS / JavaScript
-认证：Basic Auth
-工具协议：MCP
+认证：Argon2id、JWT HttpOnly Cookie、CSRF
+异步任务：RabbitMQ、Celery、Transactional Outbox
+工具协议：MCP（独立集成入口）
 ```
 
 说明：当前 Python 版只保留事件驱动多 Agent runtime，入口在 `app/agents/event_driven_runtime.py`。共享返回类型定义在 `app/agents/result.py`。RAG 默认使用 Chroma 本地持久化向量库做语义召回，同时用 BM25 做关键词召回，再融合并本地 rerank；未安装 Chroma、未配置 `OPENAI_API_KEY` 或向量服务异常时，会自动回退到本地 BM25 + `hybrid_score` reranker，避免演示环境中断。
@@ -83,7 +84,7 @@ TURN_STARTED
 - `UnderstandingAgent`：判断 `CHAT / CONSULT / RISK`，发布 intent artifact。
 - `SafetyAgent`：独立评估风险，必要时发布 `SAFETY_OVERRIDE`，并审查候选回复。
 - `ContextAgent`：按需聚合 Redis / MySQL 记忆、RAG 检索结果和 Skill 约束。
-- `ResponseAgent`：根据黑板 artifact 生成候选回复 prompt，等待安全审查和采纳。
+- `ResponseAgent`：根据黑板 artifact 生成候选回复正文，等待安全审查和采纳。
 
 ## 安装依赖
 
@@ -195,7 +196,7 @@ ALERT_EMAIL_DELIVERY_MODE=log
 
 ## 邮件预警配置
 
-高风险消息会触发心理报告，并由后端通过 MCP 工具调用完成 Excel 台账写入和邮件预警。发送邮件前需要在 `.env` 中配置 SMTP：
+高风险消息会触发心理报告，并在同一数据库事务内写入 Outbox 事件；发布器将事件投递到 RabbitMQ，再由 Celery worker 完成 Excel 台账、个案创建和邮件预警。发送邮件前需要在 `.env` 中配置 SMTP：
 
 ```env
 SMTP_HOST=smtp.example.com
@@ -367,12 +368,11 @@ python -m unittest discover -s tests
 
 项目提供一键工程 harness，用 mock AI、临时 SQLite、内存短期记忆和本地输出验证核心链路：
 
-- Risk Safety Harness：高风险识别、报告生成、后台元数据不外显、工具队列入队。
+- Risk Safety Harness：高风险识别、报告生成、后台元数据不外显、事务 Outbox 事件生成。
 - Agent Routing Harness：通过 `MindBridgeAgentHarness` 验证 CHAT / CONSULT / RISK 路由和多 Agent 步骤。
 - Standard Skills Harness：验证 `skills/*/SKILL.md` 标准 Skill 加载、选择逻辑和交接摘要模板渲染。
 - RAG Harness：基于内置评测集验证 Recall@K、MRR、NDCG 和 HitRate。
 - API Harness：健康检查、认证授权、SSE 聊天、管理员知识库接口。
-- Tool Queue Harness：Excel / case / alert 依赖、幂等、限流和 dead letter。
 
 ```bash
 python3 -m app.harness.runner
@@ -393,7 +393,7 @@ MCP Python 包建议使用 Python 3.10 或 3.11 安装运行。
 python -m app.mcp_tools.server
 ```
 
-业务后端触发报告后处理时，默认通过异步工具队列复用同一套工具实现；关闭队列后会作为 MCP client 通过 stdio 启动同一个 MCP server。
+业务后端触发报告后处理时，通过事务 Outbox、RabbitMQ 与 Celery worker 复用同一套工具实现。MCP server 可独立启动，供外部 MCP 客户端调用，但不参与 FastAPI 生产主链路。
 
 暴露工具：
 

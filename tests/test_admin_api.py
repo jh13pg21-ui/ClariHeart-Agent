@@ -45,7 +45,6 @@ class AdminReadApiTests(unittest.TestCase):
             refresh_token_days=7,
             auth_secure_cookie=True,
             auth_cookie_samesite="lax",
-            tool_queue_enabled=False,
             validate_auth_configuration=lambda: None,
         )
         self.app = create_app(settings)

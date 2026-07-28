@@ -87,13 +87,6 @@ class Settings(BaseSettings):
     alert_email_from: str = ""
     alert_email_to: str = ""
     alert_email_subject_prefix: str = "[MindBridge 高风险预警]"
-    tool_queue_enabled: bool = True
-    tool_queue_poll_interval_seconds: float = 1.0
-    tool_queue_batch_size: int = 10
-    tool_queue_max_attempts: int = 3
-    tool_queue_retry_delay_seconds: float = 15.0
-    tool_queue_excel_workers: int = 1
-    tool_queue_email_workers: int = 2
     alert_email_rate_limit_per_minute: int = 30
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
