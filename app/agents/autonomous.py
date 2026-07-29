@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import time
 import uuid
@@ -131,6 +130,8 @@ class UnderstandingAgent(BaseAutonomousAgent):
     def decide(self, task: AgentTask, board: CollaborationBlackboard) -> AgentDecision:
         if board.latest_artifact("intent"):
             return AgentDecision(False, reason="intent artifact already exists")
+        if not board.latest_artifact("memory"):
+            return AgentDecision(False, reason="waiting for shared conversation memory")
         if self._is_directed(task, board):
             return AgentDecision(True, 0.82, "open user-turn task needs understanding")
         return AgentDecision(False, reason="task does not need understanding")
@@ -173,7 +174,7 @@ class UnderstandingAgent(BaseAutonomousAgent):
         try:
             memory_context = "\n".join(item.content for item in self.private_memory()[-6:])
             messages = [
-                *PromptTemplates.intent_prompt([], text),
+                *PromptTemplates.intent_prompt(_memory_history(board), text),
                 AiMessage(role="system", content=f"{self.profile.system_prompt}\n私有记忆：\n{memory_context or '无'}"),
             ]
             label = (await self.client().complete(messages)).upper()
@@ -216,6 +217,11 @@ class SafetyAgent(BaseAutonomousAgent):
         latest_review = board.latest_artifact("output_safety")
         if latest_response and (latest_review is None or latest_review.metadata.get("responseArtifactId") != latest_response.id):
             return AgentDecision(True, 0.95, "candidate response needs safety critique")
+        if (
+            not board.latest_artifact("memory")
+            and not has_high_risk_signal(board.model_input or board.user_input)
+        ):
+            return AgentDecision(False, reason="waiting for shared conversation memory")
         if not board.latest_artifact("risk") and board.user_input:
             confidence = 0.98 if has_high_risk_signal(board.user_input) else 0.84
             return AgentDecision(True, confidence, "user input needs independent risk assessment")
@@ -233,7 +239,7 @@ class SafetyAgent(BaseAutonomousAgent):
     async def _assess_risk(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
         assessment = await PsychologicalAssessmentService(self.client()).assess(
             board.model_input or board.user_input,
-            _context_history(board),
+            [*_context_history(board), *self.private_memory()[-3:]],
         )
         payload = {
             "risk": assessment.risk.value,
@@ -363,9 +369,9 @@ class ContextAgent(BaseAutonomousAgent):
         from app.services.skills import MindBridgeSkillLibrary
 
         if task.metadata.get("kind") == "memory":
-            history = await asyncio.to_thread(
-                self.services.memory.load_recent,
-                self.services.session.public_id,
+            history = self.services.memory.load_conversation(
+                self.services.db,
+                self.services.session,
             )
             compacted, brief = compact_history_for_prompt(
                 history,
@@ -486,8 +492,17 @@ class ResponseAgent(BaseAutonomousAgent):
         risk = _risk_level(board)
         context = board.latest_artifact("context")
         context_payload = context.payload if context else {}
-        model_history = context_payload.get("modelHistory") or [AiMessage(role="user", content=board.model_input)]
-        memory_brief = context_payload.get("memoryBrief") or "无相关历史记忆。"
+        memory = board.latest_artifact("memory")
+        memory_payload = memory.payload if memory else {}
+        model_history = context_payload.get("modelHistory") or [
+            *_memory_history(board),
+            AiMessage(role="user", content=board.model_input),
+        ]
+        memory_brief = (
+            context_payload.get("memoryBrief")
+            or memory_payload.get("memoryBrief")
+            or "无相关历史记忆。"
+        )
         knowledge = context_payload.get("retrievedKnowledge") or []
         skill_context = context_payload.get("skillContext") or ""
         knowledge_context = "\n\n".join(f"- [{item.source}] {item.content}" for item in knowledge)
@@ -645,9 +660,25 @@ def _risk_level(board: CollaborationBlackboard) -> RiskLevel:
 
 def _context_history(board: CollaborationBlackboard) -> list[AiMessage]:
     context = board.latest_artifact("context")
-    if not context:
-        return [AiMessage(role="user", content=board.model_input or board.user_input)]
-    return context.payload.get("modelHistory") or [AiMessage(role="user", content=board.model_input or board.user_input)]
+    if context:
+        model_history = context.payload.get("modelHistory")
+        if model_history:
+            return list(model_history)
+    return [
+        *_memory_history(board),
+        AiMessage(role="user", content=board.model_input or board.user_input),
+    ]
+
+
+def _memory_history(board: CollaborationBlackboard) -> list[AiMessage]:
+    memory = board.latest_artifact("memory")
+    if not memory:
+        return []
+    return [
+        message
+        for message in memory.payload.get("history", [])
+        if isinstance(message, AiMessage)
+    ]
 
 
 def _format_private_memory(items: list[AiMessage]) -> str:

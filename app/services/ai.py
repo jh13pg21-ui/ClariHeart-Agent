@@ -19,6 +19,8 @@ class PromptTemplates:
                 "你是一个用户意图分类器，只做意图识别，不回答问题。"
                 "只输出 CHAT、CONSULT、RISK 之一。CHAT 包含普通闲聊、学习、编程、作业、校园事务；"
                 "CONSULT 包含压力、焦虑、低落、失眠、情绪倾诉；RISK 包含自杀、自残、伤人或即时危险信号。"
+                "必须结合最近上下文理解“是、继续、安慰一下、然后呢”等省略或承接表达，"
+                "不能因为当前输入很短就忽略上一轮正在讨论的主题。"
             )),
             AiMessage(role="user", content=f"最近上下文：\n{format_history(history)}\n\n当前输入：\n{user_input}"),
         ]
@@ -29,7 +31,8 @@ class PromptTemplates:
             AiMessage(role="system", content=(
                 "你负责分析校园心理健康消息。只返回严格 JSON："
                 '{"emotion":"NORMAL|ANXIETY|DEPRESSED|HIGH_RISK","emotionScore":0.0,'
-                '"risk":"LOW|MEDIUM|HIGH","confidence":0.0,"summary":"short reason"}'
+                '"risk":"LOW|MEDIUM|HIGH","confidence":0.0,"summary":"short reason"}。'
+                "评估时必须结合最近上下文；对承接上一轮的短句，不得仅因当前文字缺少风险关键词就忽略尚未解决的风险。"
             )),
             AiMessage(role="user", content=f"最近上下文：\n{format_history(history)}\n\n当前输入：\n{user_input}"),
         ]

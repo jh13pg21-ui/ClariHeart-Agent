@@ -1,5 +1,7 @@
+const ACTIVE_SESSION_KEY = "mindbridge.activeSessionId";
+
 const state = {
-  sessionId: null,
+  sessionId: localStorage.getItem(ACTIVE_SESSION_KEY),
   sending: false,
   profile: null,
   modelName: "mock"
@@ -30,6 +32,7 @@ async function api(path, options = {}) {
   }
   const response = await fetch(path, { ...options, headers, credentials: "same-origin" });
   if (response.status === 401) {
+    localStorage.removeItem(ACTIVE_SESSION_KEY);
     window.location.replace("/");
     throw new Error("登录状态已失效");
   }
@@ -149,7 +152,10 @@ async function sendMessage(event) {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
       buffer = parseSse(buffer, (eventData) => {
-        if (eventData.type === "meta") state.sessionId = eventData.sessionId;
+        if (eventData.type === "meta") {
+          state.sessionId = eventData.sessionId;
+          localStorage.setItem(ACTIVE_SESSION_KEY, state.sessionId);
+        }
         if (eventData.type === "token") {
           raw += eventData.content || "";
           assistant.textContent = raw;
@@ -174,6 +180,7 @@ async function sendMessage(event) {
 
 function resetSession() {
   state.sessionId = null;
+  localStorage.removeItem(ACTIVE_SESSION_KEY);
   els.messages.innerHTML = `<div class="empty"><strong>新会话已开始</strong><p>你可以继续输入新的问题。</p></div>`;
   setPill(els.sessionBadge, "READY");
 }
@@ -182,6 +189,7 @@ async function logout() {
   try {
     await api("/api/auth/logout", { method: "POST" });
   } finally {
+    localStorage.removeItem(ACTIVE_SESSION_KEY);
     window.location.assign("/");
   }
 }

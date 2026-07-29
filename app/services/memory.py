@@ -7,8 +7,10 @@ from datetime import datetime
 from importlib import import_module
 from typing import Protocol
 
+from sqlalchemy.orm import Session
+
 from app.core.config import Settings
-from app.models.entities import ChatMessage
+from app.models.entities import ChatMessage, ChatSession
 from app.schemas.dtos import AiMessage
 from app.services.privacy import PrivacySanitizer
 
@@ -36,6 +38,26 @@ class RedisShortTermMemoryStore:
         except Exception as exc:
             logger.warning("Redis memory read unavailable: %s", exc)
             return []
+
+    def load_conversation(self, db: Session, session: ChatSession) -> list[AiMessage]:
+        history = self.load_recent(session.public_id)
+        if history:
+            return history
+        try:
+            rows = (
+                db.query(ChatMessage)
+                .filter(ChatMessage.session_id == session.id)
+                .order_by(ChatMessage.id.desc())
+                .limit(self.settings.redis_memory_max_messages)
+                .all()
+            )
+        except Exception as exc:
+            logger.warning("MySQL memory fallback unavailable: %s", exc)
+            return []
+        history = self.messages_from_rows(list(reversed(rows)))
+        if history:
+            self.replace(session.public_id, history)
+        return history
 
     def messages_from_rows(self, rows: list[ChatMessage]) -> list[AiMessage]:
         return [self._message_from_row(row) for row in rows]

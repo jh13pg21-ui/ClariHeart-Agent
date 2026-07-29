@@ -129,21 +129,22 @@ class EventDrivenCoordinator:
     def _derive_missing_work(self, board: CollaborationBlackboard, force_response: bool = False) -> CollaborationBlackboard:
         board = self._ensure_task_for_missing_artifact(
             board,
-            artifact_kind="intent",
-            task_id="task:understand",
-            title="Understand user turn",
-            capability=AgentCapability.UNDERSTANDING,
-            priority=TaskPriority.HIGH,
-            condition=board.user_input != "",
-        )
-        board = self._ensure_task_for_missing_artifact(
-            board,
             artifact_kind="memory",
             task_id="task:prefetch-memory",
             title="Prefetch conversation memory",
             capability=AgentCapability.CONTEXT,
             priority=TaskPriority.HIGH,
             condition=board.user_input != "",
+        )
+        memory_ready = board.latest_artifact("memory") is not None
+        board = self._ensure_task_for_missing_artifact(
+            board,
+            artifact_kind="intent",
+            task_id="task:understand",
+            title="Understand user turn",
+            capability=AgentCapability.UNDERSTANDING,
+            priority=TaskPriority.HIGH,
+            condition=board.user_input != "" and memory_ready,
         )
         board = self._ensure_task_for_missing_artifact(
             board,
@@ -152,7 +153,7 @@ class EventDrivenCoordinator:
             title="Assess safety risk",
             capability=AgentCapability.SAFETY,
             priority=TaskPriority.CRITICAL if _hard_high_risk(board.user_input) else TaskPriority.HIGH,
-            condition=board.user_input != "",
+            condition=board.user_input != "" and memory_ready,
         )
         intent = _intent_value(board)
         risk = _risk_value(board)

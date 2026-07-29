@@ -97,6 +97,7 @@ class EventDrivenAgentRuntimeService:
         context = board.latest_artifact("context")
         risk_artifact = board.latest_artifact("risk")
         accepted = board.accepted_artifact() or board.latest_artifact("response_candidate")
+        memory = board.latest_artifact("memory")
         memory_brief = "无相关历史记忆。"
         retrieved: list[SearchResult] = []
         response_text = ""
@@ -105,6 +106,8 @@ class EventDrivenAgentRuntimeService:
             safe_fallback(risk),
             "no reviewed candidate",
         )
+        if memory:
+            memory_brief = memory.payload.get("memoryBrief") or memory_brief
         if context:
             memory_brief = context.payload.get("memoryBrief") or memory_brief
             retrieved = context.payload.get("retrievedKnowledge") or []
