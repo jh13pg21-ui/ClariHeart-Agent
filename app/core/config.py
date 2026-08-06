@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     rag_ingestion_enabled: bool = True
     rag_ingestion_queue: str = "mindbridge.ingestion"
     rag_ingestion_max_file_size_bytes: int = 52_428_800
+    rag_ingestion_max_pages: int = 500
     rag_ingestion_max_attempts: int = 3
     rag_pipeline_fingerprint: str = "rag-v1"
     rag_artifact_dir: str = "data/knowledge-artifacts"

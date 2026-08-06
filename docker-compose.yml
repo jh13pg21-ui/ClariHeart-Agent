@@ -104,6 +104,11 @@ services:
       CHROMA_PERSIST_DIR: /app/data/chroma
       CHROMA_SNAPSHOT_DIR: /app/data/chroma-snapshots
       CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-mindbridge_knowledge}
+      RAG_INGESTION_ENABLED: ${RAG_INGESTION_ENABLED:-true}
+      RAG_INGESTION_QUEUE: ${RAG_INGESTION_QUEUE:-mindbridge.ingestion}
+      RAG_INGESTION_MAX_FILE_SIZE_BYTES: ${RAG_INGESTION_MAX_FILE_SIZE_BYTES:-52428800}
+      RAG_INGESTION_MAX_PAGES: ${RAG_INGESTION_MAX_PAGES:-500}
+      RAG_ARTIFACT_DIR: /app/data/knowledge-artifacts
       PRIVACY_STORE_ORIGINAL_INPUT: ${PRIVACY_STORE_ORIGINAL_INPUT:-false}
       PRIVACY_REQUIRE_ENCRYPTION_AT_REST: ${PRIVACY_REQUIRE_ENCRYPTION_AT_REST:-false}
       SENSITIVE_DATA_ENCRYPTION_KEY: ${SENSITIVE_DATA_ENCRYPTION_KEY:-}
@@ -202,6 +207,58 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
     restart: unless-stopped
 
+  worker-ingestion:
+    build:
+      context: .
+      dockerfile: Dockerfile.ingestion
+    command: celery -A app.workers.celery_app:celery_app worker --loglevel=INFO --queues=mindbridge.ingestion --concurrency=1
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://mindbridge:mindbridge@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      KNOWLEDGE_VECTOR_ENABLED: ${KNOWLEDGE_VECTOR_ENABLED:-true}
+      KNOWLEDGE_VECTOR_REQUIRED: ${KNOWLEDGE_VECTOR_REQUIRED:-false}
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      CHROMA_SNAPSHOT_DIR: /app/data/chroma-snapshots
+      CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-mindbridge_knowledge}
+      RAG_INGESTION_ENABLED: ${RAG_INGESTION_ENABLED:-true}
+      RAG_INGESTION_QUEUE: ${RAG_INGESTION_QUEUE:-mindbridge.ingestion}
+      RAG_INGESTION_MAX_ATTEMPTS: ${RAG_INGESTION_MAX_ATTEMPTS:-3}
+      RAG_INGESTION_MAX_PAGES: ${RAG_INGESTION_MAX_PAGES:-500}
+      RAG_PIPELINE_FINGERPRINT: ${RAG_PIPELINE_FINGERPRINT:-rag-v1}
+      RAG_ARTIFACT_DIR: /app/data/knowledge-artifacts
+      RAG_PAGE_RENDER_DPI: ${RAG_PAGE_RENDER_DPI:-150}
+      RAG_OCR_ENABLED: ${RAG_OCR_ENABLED:-true}
+      RAG_OCR_PROVIDER: ${RAG_OCR_PROVIDER:-paddleocr}
+      RAG_OCR_DEVICE: ${RAG_OCR_DEVICE:-cpu}
+      RAG_VISION_ENABLED: ${RAG_VISION_ENABLED:-true}
+      RAG_VISION_PROVIDER: ${RAG_VISION_PROVIDER:-openai_compatible}
+      RAG_VISION_MODEL: ${RAG_VISION_MODEL:-gpt-5.6-luna}
+      RAG_VISION_DETAIL: ${RAG_VISION_DETAIL:-original}
+      RAG_VISION_BASE_URL: ${RAG_VISION_BASE_URL:-}
+      RAG_VISION_API_KEY: ${RAG_VISION_API_KEY:-}
+      RAG_VISION_TIMEOUT_SECONDS: ${RAG_VISION_TIMEOUT_SECONDS:-90}
+      RAG_VISION_MAX_ATTEMPTS: ${RAG_VISION_MAX_ATTEMPTS:-2}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
+    volumes:
+      - ./data:/app/data
+      - ./app/knowledge:/app/app/knowledge:ro
+      - paddle-models:/root/.paddlex
+    restart: unless-stopped
+
   worker-beat:
     build:
       context: .
@@ -255,3 +312,4 @@ volumes:
   mysql-data:
   redis-data:
   rabbitmq-data:
+  paddle-models:

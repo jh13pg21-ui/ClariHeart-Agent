@@ -8,6 +8,7 @@ data/*.sqlite
 data/*.xlsx
 data/chroma/
 data/chroma-snapshots/
+data/knowledge-artifacts/
 target/
 dist/
 *.gguf
@@ -17,3 +18,4 @@ models/mindbridge-qwen2.5-7b-lora/
 /python
 .worktrees/
 .DS_Store
+app/knowledge/pdf/*.pdf

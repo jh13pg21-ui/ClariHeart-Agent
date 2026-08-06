@@ -13,6 +13,7 @@ from app.core.security import require_admin
 from app.models.entities import UserAccount
 from app.rag_ingestion.schema import AccessClass
 from app.rag_ingestion.service import KnowledgeIngestionService
+from app.schemas.dtos import KnowledgeIngestRequest
 
 
 router = APIRouter(prefix="/api/admin/knowledge", tags=["knowledge-ingestion"])
@@ -20,6 +21,33 @@ router = APIRouter(prefix="/api/admin/knowledge", tags=["knowledge-ingestion"])
 
 def _service(request: Request, db: Session) -> KnowledgeIngestionService:
     return KnowledgeIngestionService(db, request.app.state.settings)
+
+
+@router.post("", status_code=202)
+def submit_knowledge_text(
+    payload: KnowledgeIngestRequest,
+    request: Request,
+    user: Annotated[UserAccount, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+):
+    source = payload.source.strip()
+    if not source:
+        raise HTTPException(400, "Knowledge source must not be empty.")
+    try:
+        result = _service(request, db).submit_file(
+            filename=f"{source}.txt" if not source.casefold().endswith(".txt") else source,
+            data=payload.content.encode("utf-8"),
+            mime_type="text/plain",
+            actor=user.username,
+            access_class=AccessClass.ADMIN_PRIVATE,
+            cloud_vision_allowed=False,
+            source_key=f"admin:text:{source.casefold()}",
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    response = _submission_payload(result)
+    response.update({"source": source, "chunks": 0})
+    return JSONResponse(status_code=202, content=jsonable_encoder(response))
 
 
 @router.post("/files", status_code=202)
@@ -30,10 +58,11 @@ async def upload_knowledge_file(
     file: UploadFile = File(...),
     cloud_vision_allowed: bool = Query(False, alias="cloudVisionAllowed"),
 ):
+    maximum = request.app.state.settings.rag_ingestion_max_file_size_bytes
     try:
         result = _service(request, db).submit_file(
             filename=file.filename or "uploaded-file",
-            data=await file.read(),
+            data=await file.read(maximum + 1),
             mime_type=file.content_type or "application/octet-stream",
             actor=user.username,
             access_class=AccessClass.ADMIN_PRIVATE,

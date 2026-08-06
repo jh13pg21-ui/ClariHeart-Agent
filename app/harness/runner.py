@@ -197,8 +197,9 @@ def install_harness_patches() -> None:
 
 
 def reset_database(context: HarnessContext) -> None:
-    from app.core.bootstrap import seed_data
+    from app.core.bootstrap import seed_data, submit_builtin_knowledge
     from app.cli.migrate import upgrade
+    from app.workers.ingestion_tasks import run_ingestion_job
 
     context.database.Base.metadata.drop_all(bind=context.database.engine)
     with context.database.engine.begin() as connection:
@@ -206,7 +207,15 @@ def reset_database(context: HarnessContext) -> None:
     upgrade(context.settings.database_url)
     db = context.session()
     try:
-        seed_data(db)
+        seed_data(db, settings=context.settings)
+        submissions = submit_builtin_knowledge(
+            db,
+            settings=context.settings,
+            task_dispatcher=lambda _: None,
+            include_pdfs=False,
+        )
+        for submission in submissions:
+            run_ingestion_job(db, context.settings, submission.job_id)
     finally:
         db.close()
 
@@ -634,13 +643,19 @@ def run_api_harness(context: HarnessContext) -> dict:
         admin_reports = client.get("/api/admin/reports")
         expect(admin_reports.status_code == 200, f"admin reports failed: {admin_reports.status_code}")
 
-        ingest = client.post(
-            "/api/admin/knowledge",
-            headers=admin_headers,
-            json={"source": "harness-note", "content": "考试焦虑时可以先做呼吸练习，并联系辅导员获得支持。"},
-        )
-        expect(ingest.status_code == 200, f"knowledge ingest failed: {ingest.status_code} {ingest.text}")
-        expect(ingest.json()["chunks"] >= 1, "knowledge ingest did not create chunks")
+        from unittest.mock import patch
+        from app.workers.ingestion_tasks import run_ingestion_job
+
+        with patch("app.rag_ingestion.service.dispatch_ingestion_task"):
+            ingest = client.post(
+                "/api/admin/knowledge",
+                headers=admin_headers,
+                json={"source": "harness-note", "content": "考试焦虑时可以先做呼吸练习，并联系辅导员获得支持。"},
+            )
+        expect(ingest.status_code == 202, f"knowledge ingest failed: {ingest.status_code} {ingest.text}")
+        expect(bool(ingest.json().get("jobId")), "knowledge ingest did not create an async job")
+        with context.session() as ingestion_db:
+            run_ingestion_job(ingestion_db, context.settings, ingest.json()["jobId"])
 
         status = client.get("/api/admin/knowledge/status")
         expect(status.status_code == 200, f"knowledge status failed: {status.status_code}")

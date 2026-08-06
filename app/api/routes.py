@@ -13,8 +13,6 @@ from app.models.entities import LongTermMemory, UserAccount
 from app.schemas.dtos import (
     CaseActionRequest,
     ChatRequest,
-    KnowledgeIngestRequest,
-    KnowledgeIngestResponse,
     PrivacyPreferenceRequest,
     PrivacyPreferenceResponse,
     authority,
@@ -364,16 +362,6 @@ def admin_conversation(
         ip_address=ip_address,
     )
     return result
-
-
-@router.post("/api/admin/knowledge")
-def ingest_knowledge(
-    request: KnowledgeIngestRequest,
-    _: Annotated[UserAccount, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
-):
-    chunks = KnowledgeService(db, get_settings()).ingest(request.source, request.content)
-    return KnowledgeIngestResponse(source=request.source, chunks=chunks)
 
 
 @router.get("/api/admin/knowledge/status")

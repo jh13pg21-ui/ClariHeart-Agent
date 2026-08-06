@@ -278,11 +278,11 @@ async function uploadKnowledgeFile(event) {
   }
   const data = new FormData();
   data.append("file", file);
-  els.knowledgeUploadState.textContent = "正在切分入库...";
+  els.knowledgeUploadState.textContent = "正在上传并创建摄取任务...";
   try {
     const response = await api("/api/admin/knowledge/file", { method: "POST", body: data });
     const result = await response.json();
-    els.knowledgeUploadState.textContent = `${result.source} 已入库 ${result.chunks} 个片段`;
+    els.knowledgeUploadState.textContent = `${result.source} 已进入异步摄取队列（任务 ${result.jobId}）`;
     els.knowledgeFile.value = "";
     loadKnowledgeStatus();
   } catch (error) {

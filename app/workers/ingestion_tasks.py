@@ -68,6 +68,7 @@ def build_ingestion_pipeline(db: Session, settings: Settings) -> IngestionPipeli
             )
         ),
         indexer=KnowledgeChunkIndexer(db, settings),
+        max_pages=settings.rag_ingestion_max_pages,
     )
 
 

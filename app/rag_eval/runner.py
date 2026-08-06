@@ -3,10 +3,11 @@ import math
 from datetime import datetime
 from pathlib import Path
 
-from app.core.bootstrap import create_schema, seed_data
+from app.core.bootstrap import create_schema, seed_data, submit_builtin_knowledge
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.services.knowledge import KnowledgeService
+from app.workers.ingestion_tasks import run_ingestion_job
 
 
 def evaluate() -> dict:
@@ -14,7 +15,15 @@ def evaluate() -> dict:
     create_schema()
     db = SessionLocal()
     try:
-        seed_data(db)
+        seed_data(db, settings=settings)
+        submissions = submit_builtin_knowledge(
+            db,
+            settings=settings,
+            task_dispatcher=lambda _: None,
+            include_pdfs=False,
+        )
+        for submission in submissions:
+            run_ingestion_job(db, settings, submission.job_id)
         service = KnowledgeService(db, settings)
         dataset_path = Path(settings.rag_eval_dataset)
         cases = json.loads(dataset_path.read_text(encoding="utf-8"))
@@ -104,4 +113,3 @@ if __name__ == "__main__":
     print("RAG evaluation completed.")
     for key in ["totalCases", "topK", "recallAtK", "precisionAtK", "mrr", "ndcgAtK", "hitRate", "averageFirstRelevantRank"]:
         print(f"{key}={report[key]}")
-

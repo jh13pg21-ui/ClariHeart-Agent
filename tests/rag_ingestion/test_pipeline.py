@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
+import pytest
 
 from app.core.database import Base
 from app.rag_ingestion.artifacts import ArtifactStore
 from app.rag_ingestion.chunking import ChunkingConfig, StructureAwareChunker
 from app.rag_ingestion.fusion import PageEvidenceFusion
+from app.rag_ingestion.errors import IngestionError
 from app.rag_ingestion.pipeline import IngestionPipeline
 from app.rag_ingestion.repository import KnowledgeIngestionRepository
 from app.rag_ingestion.routing import PageRouter
@@ -113,4 +115,37 @@ def test_pipeline_runs_native_local_path_and_activates_only_after_index_validati
         pipeline.run(submission.job.id)
         assert parser.calls == 1
         assert indexer.calls == 2
+    engine.dispose()
+
+
+def test_pipeline_rejects_documents_over_page_limit(tmp_path):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        repository = KnowledgeIngestionRepository(db)
+        submission = repository.ensure_submission(
+            source_key="admin:limited.txt", display_name="limited.txt", mime_type="text/plain",
+            sha256="c" * 64, size_bytes=7, access_class=AccessClass.ADMIN_PRIVATE,
+            cloud_vision_allowed=False, trigger_actor="admin", pipeline_fingerprint="rag-v1",
+        )
+        store = ArtifactStore(tmp_path)
+        store.write_source(submission.document.id, submission.version.sha256, b"content")
+        blocked = ForbiddenProvider()
+        pipeline = IngestionPipeline(
+            repository=repository,
+            artifact_store=store,
+            parsers={"text/plain": FakeParser()},
+            router=PageRouter(),
+            ocr_provider=blocked,
+            vision_provider=blocked,
+            fusion=PageEvidenceFusion(),
+            chunker=StructureAwareChunker(ChunkingConfig(child_min_tokens=1)),
+            indexer=RecordingIndexer(),
+            max_pages=0,
+        )
+        with pytest.raises(IngestionError) as error:
+            pipeline.run(submission.job.id)
+        assert error.value.code == "PAGE_LIMIT_EXCEEDED"
+        db.refresh(submission.job)
+        assert submission.job.status == "FAILED"
     engine.dispose()

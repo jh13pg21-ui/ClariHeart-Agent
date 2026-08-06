@@ -8,6 +8,8 @@ redis==5.2.1
 celery==5.4.0
 pydantic-settings==2.7.1
 chromadb==0.5.23
+# PaddleX 3.7 固定 PyYAML 6.0.2；Kubernetes 31 与 Chroma 兼容且不要求更高版本。
+kubernetes==31.0.0
 python-multipart==0.0.20
 httpx==0.28.1
 argon2-cffi==23.1.0

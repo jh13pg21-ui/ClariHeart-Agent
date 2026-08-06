@@ -188,7 +188,11 @@ mindbridge-qwen2.5-7b-ft:latest
 
 ## Chroma 向量库与快照
 
-应用启动时会同步 `app/knowledge/*.md` 内置默认知识库到数据库。当前默认文档覆盖校园心理支持总则、风险等级策略、焦虑恐慌、情绪低落、睡眠作息、学业压力、考试季、人际关系、新生适应、咨询转介和隐私边界等主题；如果默认 md 内容发生变化，重启后对应来源会按当前切块规则刷新入库。
+应用启动不再解析知识文件。内置 Markdown 与 `app/knowledge/pdf/` 下的 PDF 通过幂等异步命令提交；文件哈希未变化时不会重复解析或重复调用 Vision：
+
+```bash
+python -m app.cli.knowledge sync-builtins
+```
 
 知识库默认优先使用 Chroma 持久化向量库，embedding 由 OpenAI `text-embedding-3-small` 提供。查询时会同时取向量候选和 BM25 候选，按配置权重融合后进入本地 reranker。没有 `OPENAI_API_KEY`、缺少 `chromadb` 或向量调用失败时，会回退到本地 BM25 + `hybrid_score` reranker：
 
@@ -386,7 +390,7 @@ curl -b admin.cookies -H "X-CSRF-Token: $ADMIN_CSRF" \
   http://127.0.0.1:8080/api/admin/knowledge
 ```
 
-追加知识库时，系统会同步写入 MySQL 分块和 Chroma 向量库；已有分块会在首次向量检索时自动补建 Chroma 索引。
+追加知识库返回 `202 Accepted`，解析、OCR、Vision、切块和索引均由 `mindbridge.ingestion` 队列异步完成。新版本完成索引集合校验后才原子激活；失败时旧 active 版本继续提供检索。
 
 ## RAG 评测
 
@@ -400,22 +404,46 @@ AI_PROVIDER=mock python -m app.rag_eval.runner
 target/rag-eval-report.json
 ```
 
-## RAG 后续演进（TODO）
+## 生产级 RAG 文档摄取
 
-当前 RAG 已完成 MySQL 知识分块、OpenAI-compatible Embedding、Chroma 向量召回、BM25 混合检索和本地规则 rerank，但文档摄取仍是工程基线：PDF 使用 `pypdf` 提取纯文本，Markdown/TXT 按 UTF-8 解码，再以 512 字符、64 字符重叠的固定窗口切块。该方案可以验证完整链路，但对扫描件、复杂排版、表格、标题层级、页码溯源和中文语义边界的处理仍然有限。
+PDF 首先由 LiteParse 2.11.1 在关闭内置 OCR 的条件下提取原生文字、坐标、页面图像和复杂度证据。LiteParse 不是最终 OCR，也不决定页面是否调用云模型。独立的二维路由器分别选择文字策略 `NATIVE / PADDLE_OCR / HYBRID` 与结构策略 `LOCAL / VISION`：纯文本页保留本地低成本路径，扫描文字交给 PaddleOCR，双栏、表格、漫画和信息图仅在确有结构或视觉语义需求时调用 Vision。
 
-后续将参考 [LiteParse OCR 在精细化 RAG 文档解析中的实践](https://paicoding.com/liteparse-ocr-review)，按以下阶段升级；参考项目只作为设计输入，最终实现需适配 MindBridge 的 Python、Docker、本地模型和校园心理数据隐私边界：
+所有证据经过本地严格 Schema 校验与融合，形成唯一的 Canonical Document JSON。父块保存完整章节上下文，子块用于召回；检索命中子块后返回父块内容，同时保留 `documentId`、页码、章节路径和 block 引用。旧的固定字符窗口只保留为历史数据兼容路径，不再承担新文件摄取。
 
-- [ ] 建立可插拔 `DocumentParser` 层，区分 PDF、Markdown、TXT、图片与 Office 文档；优先保留结构化解析结果，不再把所有文档立即压成单段纯文本。
-- [ ] 为 PDF 接入本地 LiteParse/PDFium 解析，并对扫描页或文本稀疏页按需启用 Tesseract OCR；Docker 镜像预装 `chi_sim+eng` 语言包，OCR 默认在本地完成。
-- [ ] 保存页码、段落、标题路径、文本边界框和解析器版本等 metadata，使召回结果能够定位到原文页和具体片段，并为前端引用展示预留接口。
-- [ ] 将固定字符窗口升级为结构感知的父文档—子切片策略：优先按标题、页、段落和句子边界切分，超长内容再递归切分；配置最小块、目标块和重叠大小，并避免从中文词语中间截断。
-- [ ] 将文档解析、切块、Embedding 和索引构建改为异步摄取任务，增加文件大小/页数限制、超时、并发隔离、失败重试、临时文件清理和可查询的任务状态，避免 OCR 阻塞 FastAPI 请求线程。
-- [ ] 增加文件哈希、Chunk 稳定 ID、去重和增量更新；文档未变化时不重复解析和计费，局部变化时只重建受影响的 Embedding 与 Chroma 索引。
-- [ ] 抽象 Embedding Provider，支持 OpenAI-compatible 与本地 Ollama Embedding；记录模型名、版本和向量维度，模型切换时创建新 Collection 并执行受控重建，禁止混用不同向量空间。
-- [ ] 将当前规则型 reranker 升级为可插拔 reranker，并补充 metadata filter、动态混合权重、查询改写、去重和上下文预算控制；保留 BM25-only 降级路径。
-- [ ] 扩充 RAG 评测集，覆盖文本 PDF、扫描件、双栏排版、表格、中文长句和校园心理知识问答，同时评估解析成功率、OCR 准确度、Recall@K、MRR、NDCG、引用命中率、延迟和资源占用。
-- [ ] 落实心理健康资料的隐私治理：外部 OCR 默认关闭，启用云 OCR 前必须显式配置并完成脱敏；原文件、解析文本、Embedding、快照和临时文件统一纳入权限、审计、保留期与安全删除策略。
+安装与启动：
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-ingestion.txt
+docker compose up -d --build worker-ingestion app
+python -m app.cli.knowledge sync-builtins
+```
+
+默认 Vision 使用 OpenAI-compatible `/v1/chat/completions`，本项目配置为 `gpt-5.6-luna`；`RAG_VISION_BASE_URL` 和 `RAG_VISION_API_KEY` 留空时复用 `OPENAI_BASE_URL` 与 `OPENAI_API_KEY`。PaddleOCR 仅安装和加载在单并发 ingestion worker 中，Web 镜像不包含 Paddle 依赖。
+
+隐私边界：`BUILTIN_PUBLIC` 可允许 Vision；管理员私有文件默认禁止云发送，上传时只有显式传入 `cloudVisionAllowed=true` 才会授权。学生聊天、心理报告、长期记忆和用户个人材料不得进入知识摄取 Vision Provider。原始文件、页面证据和 Canonical JSON 保存在 `RAG_ARTIFACT_DIR`，日志不记录整页 OCR/Vision 正文和 API Key。
+
+管理员 API：
+
+```text
+POST /api/admin/knowledge/files
+GET  /api/admin/knowledge/documents
+GET  /api/admin/knowledge/documents/{documentId}
+GET  /api/admin/knowledge/documents/{documentId}/pages
+GET  /api/admin/knowledge/jobs/{jobId}
+POST /api/admin/knowledge/jobs/{jobId}/retry
+```
+
+失败任务会返回脱敏的 `stage`、`error.code` 与 `error.retryable`。只有可重试失败可以直接重试；`NEEDS_REVIEW` 必须在人工确认后显式授权 Vision。回滚无需修改旧数据：失败版本保持 inactive，旧 active 版本继续服务。
+
+五份 PDF 的评测集覆盖 270 页，另有 30 页深度条目：
+
+```bash
+python -m app.rag_ingestion.evaluation.runner --validate-only
+python -m app.rag_ingestion.evaluation.runner --predictions target/rag-predictions.json
+```
+
+当前仓库中的页级标签是机器种子标注，CLI 会在人工复核前阻止其被当作发布金标。真实 Paddle/Vision smoke 需显式设置 `RAG_OCR_ONLINE_TEST=true` 与 `RAG_VISION_ONLINE_TEST=true`，避免普通离线测试产生网络调用或费用。
 
 ## 风险安全门评测
 

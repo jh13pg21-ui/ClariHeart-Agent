@@ -6,7 +6,7 @@ from typing import Protocol
 from app.models.entities import KnowledgeChunk
 from app.rag_ingestion.artifacts import ArtifactStore
 from app.rag_ingestion.chunking import StructureAwareChunker
-from app.rag_ingestion.errors import NeedsReviewError, sanitize_error
+from app.rag_ingestion.errors import IngestionError, NeedsReviewError, sanitize_error
 from app.rag_ingestion.fusion import PageEvidenceFusion
 from app.rag_ingestion.parsers.base import DocumentParser, ParserContext
 from app.rag_ingestion.repository import KnowledgeIngestionRepository
@@ -42,6 +42,7 @@ class IngestionPipeline:
         fusion: PageEvidenceFusion,
         chunker: StructureAwareChunker,
         indexer: ChunkIndexer,
+        max_pages: int = 500,
     ):
         self.repository = repository
         self.artifact_store = artifact_store
@@ -52,6 +53,7 @@ class IngestionPipeline:
         self.fusion = fusion
         self.chunker = chunker
         self.indexer = indexer
+        self.max_pages = max_pages
 
     def run(self, job_id: str) -> None:
         try:
@@ -100,6 +102,11 @@ class IngestionPipeline:
             source_sha256=version.sha256,
         )
         parsed = parser.parse_bytes(document.display_name, data, context)
+        if len(parsed.pages) > self.max_pages:
+            raise IngestionError(
+                f"文档页数 {len(parsed.pages)} 超过限制 {self.max_pages}",
+                code="PAGE_LIMIT_EXCEEDED",
+            )
         self.repository.update_stage(job_id, "ROUTING", total_pages=len(parsed.pages))
         canonical_pages = []
         for page in parsed.pages:
