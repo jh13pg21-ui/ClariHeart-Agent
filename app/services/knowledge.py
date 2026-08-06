@@ -4,7 +4,7 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Hashable
 
 from pypdf import PdfReader
@@ -24,6 +24,12 @@ class SearchResult:
     source: str
     content: str
     score: float
+    document_id: str | None = None
+    filename: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    block_ids: list[str] = field(default_factory=list)
+    section_path: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -40,7 +46,13 @@ class KnowledgeService:
         self.vector_store = ChromaKnowledgeStore(settings)
 
     def count(self) -> int:
-        return self.db.query(KnowledgeChunk).count()
+        return self._searchable_query().count()
+
+    def _searchable_query(self):
+        return self.db.query(KnowledgeChunk).filter(
+            KnowledgeChunk.active.is_(True),
+            KnowledgeChunk.chunk_kind.in_(("CHILD", "LEGACY_TEXT")),
+        )
 
     def ensure_source(self, source: str, content: str) -> int:
         chunks = chunk_text(content, self.settings.knowledge_chunk_size, self.settings.knowledge_chunk_overlap)
@@ -89,7 +101,9 @@ class KnowledgeService:
     def rebuild_vector_index(self) -> int:
         if not self.vector_store.can_embed:
             raise RuntimeError(getattr(self.vector_store, "error", "") or "Chroma 向量库不可用")
-        rows = self.db.query(KnowledgeChunk).order_by(KnowledgeChunk.source.asc(), KnowledgeChunk.source_index.asc()).all()
+        rows = self._searchable_query().order_by(
+            KnowledgeChunk.source.asc(), KnowledgeChunk.source_index.asc()
+        ).all()
         self._sync_vector_chunks(rows)
         self.db.commit()
         return len(rows)
@@ -108,7 +122,13 @@ class KnowledgeService:
         self.db.query(KnowledgeChunk).filter(KnowledgeChunk.source == source).delete()
         rows = []
         for index, chunk in enumerate(chunks):
-            row = KnowledgeChunk(source=source, source_index=index, content=chunk)
+            row = KnowledgeChunk(
+                source=source,
+                source_index=index,
+                content=chunk,
+                chunk_kind="LEGACY_TEXT",
+                active=True,
+            )
             self.db.add(row)
             rows.append(row)
         self.db.flush()
@@ -127,7 +147,7 @@ class KnowledgeService:
     def retrieve(self, query: str, top_k: int | None = None) -> list[SearchResult]:
         top_k = top_k or self.settings.knowledge_top_k
         candidate_k = self._candidate_k(top_k)
-        chunks = self.db.query(KnowledgeChunk).all()
+        chunks = self._searchable_query().all()
         # Primary retrieval now uses hybrid recall: semantic vector candidates
         # plus BM25 keyword candidates, followed by deterministic local rerank.
         vector_results = self._retrieve_vector(query, candidate_k)
@@ -138,10 +158,10 @@ class KnowledgeService:
         return []
 
     def _retrieve_bm25(self, query: str, top_k: int, chunks: list[KnowledgeChunk] | None = None) -> list[SearchResult]:
-        chunks = chunks if chunks is not None else self.db.query(KnowledgeChunk).all()
+        chunks = chunks if chunks is not None else self._searchable_query().all()
         scores = bm25_scores(query, chunks)
         ranked = [
-            SearchResult(chunk.id, chunk.source, chunk.content, scores.get(chunk.id, 0.0))
+            self._result_from_chunk(chunk, scores.get(chunk.id, 0.0))
             for chunk in chunks
             if chunk.id is not None and scores.get(chunk.id, 0.0) > 0
         ]
@@ -217,18 +237,17 @@ class KnowledgeService:
         results = []
         for hit in hits:
             chunk = self.db.get(KnowledgeChunk, hit.chunk_id) if hit.chunk_id is not None else None
-            results.append(
-                SearchResult(
-                    chunk.id if chunk is not None else hit.chunk_id,
-                    chunk.source if chunk is not None else hit.source,
-                    chunk.content if chunk is not None else hit.content,
-                    hit.score,
-                )
-            )
+            if chunk is None:
+                continue
+            if not chunk.active or chunk.chunk_kind not in {"CHILD", "LEGACY_TEXT"}:
+                continue
+            results.append(self._result_from_chunk(chunk, hit.score))
         return results
 
     def _ensure_vector_index(self) -> None:
-        rows = self.db.query(KnowledgeChunk).order_by(KnowledgeChunk.source.asc(), KnowledgeChunk.source_index.asc()).all()
+        rows = self._searchable_query().order_by(
+            KnowledgeChunk.source.asc(), KnowledgeChunk.source_index.asc()
+        ).all()
         if not rows:
             return
         if (
@@ -317,15 +336,36 @@ class KnowledgeService:
         chunk = self.db.get(KnowledgeChunk, result.chunk_id)
         if chunk is None:
             return result
+        if chunk.parent_chunk_id is not None:
+            parent = self.db.get(KnowledgeChunk, chunk.parent_chunk_id)
+            if parent is not None and parent.active:
+                return replace(result, content=parent.content)
         neighbors = (
-            self.db.query(KnowledgeChunk)
+            self._searchable_query()
             .filter(KnowledgeChunk.source == chunk.source)
+            .filter(KnowledgeChunk.chunk_kind == "LEGACY_TEXT")
             .filter(KnowledgeChunk.source_index >= max(0, chunk.source_index - 1))
             .filter(KnowledgeChunk.source_index <= chunk.source_index + 1)
             .order_by(KnowledgeChunk.source_index.asc())
             .all()
         )
-        return SearchResult(chunk.id, chunk.source, "\n\n".join(item.content for item in neighbors), result.score)
+        if not neighbors:
+            return result
+        return replace(result, content="\n\n".join(item.content for item in neighbors))
+
+    def _result_from_chunk(self, chunk: KnowledgeChunk, score: float) -> SearchResult:
+        return SearchResult(
+            chunk_id=chunk.id,
+            source=chunk.source,
+            content=chunk.content,
+            score=score,
+            document_id=chunk.document_id,
+            filename=chunk.source,
+            page_start=chunk.page_start,
+            page_end=chunk.page_end,
+            block_ids=parse_string_list(chunk.block_ids_json),
+            section_path=parse_string_list(chunk.section_path_json),
+        )
 
 
 def chunk_text(content: str, size: int, overlap: int) -> list[str]:
@@ -432,7 +472,19 @@ def result_key(result: SearchResult) -> Hashable:
 
 
 def replace_score(result: SearchResult, score: float) -> SearchResult:
-    return SearchResult(result.chunk_id, result.source, result.content, score)
+    return replace(result, score=score)
+
+
+def parse_string_list(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
 
 
 def parse_embedding(raw: str | None) -> list[float] | None:
