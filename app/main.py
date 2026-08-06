@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.auth_routes import router as auth_router
+from app.api.knowledge_routes import router as knowledge_router
 from app.api.routes import router
 from app.core.bootstrap import ensure_database_current
 from app.core.config import get_settings
@@ -37,6 +38,7 @@ def create_app(settings=None) -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(router)
+    app.include_router(knowledge_router)
     static_dir = Path(__file__).resolve().parent / "static"
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
     return app

@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -399,11 +399,3 @@ def backup_knowledge_vector(_: Annotated[UserAccount, Depends(require_admin)], d
     return {"snapshot": snapshot}
 
 
-@router.post("/api/admin/knowledge/file")
-async def ingest_file(
-    _: Annotated[UserAccount, Depends(require_admin)],
-    db: Annotated[Session, Depends(get_db)],
-    file: UploadFile = File(...),
-):
-    chunks = KnowledgeService(db, get_settings()).ingest_file(file.filename or "uploaded-file", await file.read())
-    return KnowledgeIngestResponse(source=file.filename or "uploaded-file", chunks=chunks)

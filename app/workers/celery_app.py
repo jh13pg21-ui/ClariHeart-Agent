@@ -12,7 +12,7 @@ celery_app = Celery(
     "mindbridge",
     broker=settings.rabbitmq_url,
     backend=settings.celery_result_backend,
-    include=["app.workers.tasks"],
+    include=["app.workers.tasks", "app.workers.ingestion_tasks"],
 )
 celery_app.conf.update(
     broker_transport_options={"confirm_publish": True},
@@ -34,6 +34,12 @@ celery_app.conf.update(
             settings.celery_alert_queue,
             exchange=event_exchange,
             routing_key=settings.celery_alert_queue,
+            durable=True,
+        ),
+        Queue(
+            settings.rag_ingestion_queue,
+            exchange=event_exchange,
+            routing_key=settings.rag_ingestion_queue,
             durable=True,
         ),
     ),
@@ -61,6 +67,10 @@ celery_app.conf.update(
         "app.workers.tasks.send_high_risk_alert": {
             "queue": settings.celery_alert_queue,
             "routing_key": settings.celery_alert_queue,
+        },
+        "app.workers.ingestion_tasks.ingest_knowledge_document": {
+            "queue": settings.rag_ingestion_queue,
+            "routing_key": settings.rag_ingestion_queue,
         },
     },
     beat_schedule={

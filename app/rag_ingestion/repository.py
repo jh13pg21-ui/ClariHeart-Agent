@@ -126,6 +126,44 @@ class KnowledgeIngestionRepository:
             raise LookupError("逻辑文档不存在")
         return job, version, document
 
+    def create_retry_job(
+        self,
+        job_id: str,
+        *,
+        trigger_actor: str,
+        cloud_vision_allowed: bool | None = None,
+    ) -> KnowledgeIngestionJob:
+        previous, version, document = self.get_context(job_id)
+        if previous.status == "FAILED" and not previous.error_retryable:
+            raise ValueError("The failed ingestion job is not retryable.")
+        if previous.status == "NEEDS_REVIEW":
+            if cloud_vision_allowed is not True:
+                raise ValueError("Review jobs require explicit cloud Vision authorization.")
+        elif previous.status != "FAILED":
+            raise ValueError("Only FAILED or NEEDS_REVIEW jobs can be retried.")
+
+        active = (
+            self.db.query(KnowledgeIngestionJob)
+            .filter_by(document_version_id=version.id)
+            .filter(KnowledgeIngestionJob.status.in_(ACTIVE_JOB_STATUSES))
+            .first()
+        )
+        if active is not None:
+            return active
+        if cloud_vision_allowed is not None:
+            document.cloud_vision_allowed = cloud_vision_allowed
+        version.status = "PENDING"
+        retry = KnowledgeIngestionJob(
+            id=f"job_{uuid.uuid4().hex[:24]}",
+            document_version_id=version.id,
+            stage="PENDING",
+            status="PENDING",
+            trigger_actor=trigger_actor,
+        )
+        self.db.add(retry)
+        self.db.commit()
+        return retry
+
     def update_stage(self, job_id: str, stage: str, *, progress_page: int | None = None, total_pages: int | None = None) -> None:
         job = self.db.get(KnowledgeIngestionJob, job_id)
         if job is None:
