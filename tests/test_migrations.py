@@ -26,6 +26,10 @@ NEW_TABLES = {
     "processed_messages",
     "long_term_memories",
     "conversation_memory_summaries",
+    "knowledge_documents",
+    "knowledge_document_versions",
+    "knowledge_ingestion_jobs",
+    "knowledge_pages",
 }
 
 
@@ -237,7 +241,7 @@ class MigrationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             scalar_sql(self.legacy_url, "SELECT version_num FROM alembic_version"),
-            "0007_structured_summary",
+            "0008_rag_ingestion",
         )
 
     def test_unknown_or_incomplete_legacy_schema_is_rejected(self):

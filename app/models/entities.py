@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -141,6 +142,102 @@ class KnowledgeChunk(Base):
     content: Mapped[str] = mapped_column(Text)
     embedding_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    stable_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, unique=True, index=True)
+    document_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("knowledge_documents.id"), nullable=True, index=True
+    )
+    document_version_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("knowledge_document_versions.id"), nullable=True, index=True
+    )
+    parent_chunk_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("knowledge_chunks.id"), nullable=True, index=True
+    )
+    chunk_kind: Mapped[str] = mapped_column(String(32), default="LEGACY_TEXT", server_default="LEGACY_TEXT", index=True)
+    page_start: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    page_end: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    section_path_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    block_ids_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    embedding_model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    embedding_dimension: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1", index=True)
+
+
+class KnowledgeDocument(Base):
+    __tablename__ = "knowledge_documents"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    source_key: Mapped[str] = mapped_column(String(512), unique=True)
+    display_name: Mapped[str] = mapped_column(String(256))
+    mime_type: Mapped[str] = mapped_column(String(128))
+    access_class: Mapped[str] = mapped_column(String(32), index=True)
+    cloud_vision_allowed: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    active_version_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class KnowledgeDocumentVersion(Base):
+    __tablename__ = "knowledge_document_versions"
+    __table_args__ = (UniqueConstraint("document_id", "sha256", name="uq_knowledge_doc_version_hash"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("knowledge_documents.id"), index=True)
+    sha256: Mapped[str] = mapped_column(String(64))
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    page_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    pipeline_fingerprint: Mapped[str] = mapped_column(String(128))
+    canonical_artifact_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    previous_version_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class KnowledgeIngestionJob(Base):
+    __tablename__ = "knowledge_ingestion_jobs"
+    __table_args__ = (
+        Index("ix_knowledge_ingestion_jobs_version_status", "document_version_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    document_version_id: Mapped[str] = mapped_column(ForeignKey("knowledge_document_versions.id"), index=True)
+    stage: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    progress_page: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    total_pages: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_retryable: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    trigger_actor: Mapped[str] = mapped_column(String(128))
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class KnowledgePage(Base):
+    __tablename__ = "knowledge_pages"
+    __table_args__ = (
+        UniqueConstraint("document_version_id", "page_number", name="uq_knowledge_page_version_number"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    document_version_id: Mapped[str] = mapped_column(ForeignKey("knowledge_document_versions.id"), index=True)
+    page_number: Mapped[int] = mapped_column(Integer)
+    width_px: Mapped[int] = mapped_column(Integer)
+    height_px: Mapped[int] = mapped_column(Integer)
+    rotation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    text_strategy: Mapped[str] = mapped_column(String(32), index=True)
+    structure_strategy: Mapped[str] = mapped_column(String(32), index=True)
+    route_reasons_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    quality_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    image_artifact_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    canonical_json: Mapped[str] = mapped_column(Text().with_variant(LONGTEXT(), "mysql"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
 class PsychologicalReport(Base):
