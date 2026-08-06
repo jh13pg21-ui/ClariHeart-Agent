@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import json
 import os
 import sys
@@ -46,6 +45,31 @@ class InMemoryShortTermMemoryStore:
     def load_recent(self, session_public_id: str) -> list[object]:
         limit = self.settings.redis_memory_max_messages
         return list(self._messages.get(session_public_id, []))[-limit:]
+
+    def load_conversation(self, db, session) -> list[object]:
+        history = self.load_recent(session.public_id)
+        if history:
+            return history
+        rows = (
+            db.query(__import__("app.models.entities", fromlist=["ChatMessage"]).ChatMessage)
+            .filter_by(session_id=session.id)
+            .order_by(__import__("app.models.entities", fromlist=["ChatMessage"]).ChatMessage.id.desc())
+            .limit(self.settings.redis_memory_max_messages)
+            .all()
+        )
+        history = self.messages_from_rows(list(reversed(rows)))
+        self.replace(session.public_id, history)
+        return history
+
+    def prompt_history(self, session_public_id: str, history: list[object]):
+        from app.services.memory import ConversationSummaryState
+
+        state = ConversationSummaryState.from_history(history, self.settings)
+        prompt = list(state.tail)
+        if state.summary:
+            from app.schemas.dtos import AiMessage
+            prompt.insert(0, AiMessage(role="system", content=f"历史摘要：\n{state.summary}"))
+        return prompt, state.summary
 
     def messages_from_rows(self, rows: list[object]) -> list[object]:
         from app.schemas.dtos import AiMessage
@@ -118,6 +142,9 @@ def configure_environment() -> None:
             candidate.unlink()
 
     os.environ["DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
+    os.environ["APP_ENVIRONMENT"] = "test"
+    os.environ["JWT_SECRET_KEY"] = "mindbridge-harness-jwt-secret-at-least-32-bytes"
+    os.environ["AUTH_SECURE_COOKIE"] = "false"
     os.environ["AI_PROVIDER"] = "mock"
     os.environ["AGENT_FRAMEWORK"] = "event_driven_multi_agent"
     os.environ["KNOWLEDGE_VECTOR_ENABLED"] = "false"
@@ -160,9 +187,12 @@ def install_harness_patches() -> None:
 
 def reset_database(context: HarnessContext) -> None:
     from app.core.bootstrap import seed_data
+    from app.cli.migrate import upgrade
 
     context.database.Base.metadata.drop_all(bind=context.database.engine)
-    context.database.Base.metadata.create_all(bind=context.database.engine)
+    with context.database.engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE IF EXISTS alembic_version")
+    upgrade(context.settings.database_url)
     db = context.session()
     try:
         seed_data(db)
@@ -210,6 +240,13 @@ def run_risk_safety_harness(context: HarnessContext) -> dict:
     from app.models.entities import OutboxEvent, PsychologicalReport, UserAccount
     from app.schemas.dtos import ChatRequest
     from app.services.chat import ChatService
+    from app.risk_eval.runner import evaluate_cases
+
+    risk_cases = json.loads((context.root / context.settings.risk_eval_dataset).read_text(encoding="utf-8"))
+    risk_metrics = evaluate_cases(risk_cases)
+    expect(risk_metrics["totalCases"] >= 30, "risk evaluation dataset is too small")
+    expect(risk_metrics["highRiskRecall"] >= 0.95, f"high-risk recall below threshold: {risk_metrics['highRiskRecall']:.3f}")
+    expect(risk_metrics["macroF1"] >= 0.80, f"risk macro F1 below threshold: {risk_metrics['macroF1']:.3f}")
 
     db = context.session()
     observed = []
@@ -281,7 +318,13 @@ def run_risk_safety_harness(context: HarnessContext) -> dict:
             observed.append({"id": case["id"], "report": report is not None, "assistantChars": len(token_text)})
     finally:
         db.close()
-    return {"cases": observed}
+    return {
+        "cases": observed,
+        "offlineEvaluation": {
+            key: risk_metrics[key]
+            for key in ("totalCases", "accuracy", "macroF1", "highRiskRecall", "highRiskFalseNegatives")
+        },
+    }
 
 
 def run_agent_routing_harness(context: HarnessContext) -> dict:
@@ -300,8 +343,7 @@ def run_agent_routing_harness(context: HarnessContext) -> dict:
                 "id": "normal-companion",
                 "message": "帮我解释一下 Python list comprehension。",
                 "intent": IntentType.CHAT.value,
-                "must_steps": ["UnderstandingAgent", "SafetyAgent", "ResponseAgent", "CoordinatorAgent"],
-                "must_not_steps": ["ContextAgent"],
+                "must_steps": ["UnderstandingAgent", "SafetyAgent", "ContextAgent", "ResponseAgent", "CoordinatorAgent"],
             },
             {
                 "id": "consult-counselor",
@@ -312,7 +354,7 @@ def run_agent_routing_harness(context: HarnessContext) -> dict:
             {
                 "id": "risk-counselor",
                 "message": "我不想活了，觉得撑不下去了。",
-                "intent": IntentType.RISK.value,
+                "intent": IntentType.CONSULT.value,
                 "risk": RiskLevel.HIGH.value,
                 "must_steps": ["UnderstandingAgent", "SafetyAgent", "ContextAgent", "ResponseAgent", "CoordinatorAgent"],
             },
@@ -392,7 +434,7 @@ def run_standard_skills_harness(context: HarnessContext) -> dict:
     expect("应用 skill: anxiety_grounding_support" in context_text, "response context did not include standard skill body")
 
     high_risk_names = MindBridgeSkillLibrary.response_skill_names(
-        IntentType.RISK,
+        IntentType.CONSULT,
         RiskLevel.HIGH,
         "我不想活了。",
     )
@@ -403,7 +445,7 @@ def run_standard_skills_harness(context: HarnessContext) -> dict:
         user_id=42,
         session_id=1,
         content="我不想活了，觉得撑不下去。",
-        intent=IntentType.RISK.value,
+        intent=IntentType.CONSULT.value,
         emotion=EmotionLabel.HIGH_RISK.value,
         emotion_score=4.0,
         risk_level=RiskLevel.HIGH.value,
@@ -468,48 +510,49 @@ def run_api_harness(context: HarnessContext) -> dict:
 
     from app.main import create_app
 
-    app = create_app()
-    student_auth = basic_auth("student", "student123")
-    admin_auth = basic_auth("admin", "admin123")
+    app = create_app(context.settings)
     observed = {}
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://testserver") as client:
         health = client.get("/actuator/health")
         expect(health.status_code == 200 and health.json()["status"] == "UP", "health endpoint failed")
         observed["health"] = health.json()
 
-        profile = client.get("/api/profile", headers=student_auth)
+        admin_headers = login_headers(client, "admin", "admin123")
+        admin_chat = client.post("/api/chat/stream", headers=admin_headers, json={"message": "hello"})
+        expect(admin_chat.status_code == 403, f"admin chat should be forbidden, got {admin_chat.status_code}")
+
+        student_headers = login_headers(client, "student", "student123")
+        profile = client.get("/api/profile")
         expect(profile.status_code == 200, f"student profile failed: {profile.status_code}")
         expect(profile.json()["username"] == "student", "student profile returned wrong user")
 
-        agent_status = client.get("/api/agent/status", headers=student_auth)
+        agent_status = client.get("/api/agent/status")
         expect(agent_status.status_code == 200, f"agent status failed: {agent_status.status_code}")
         status_skills = agent_status.json()["skills"]
         expect(len(status_skills) >= 7, f"agent status exposed too few standard skills: {len(status_skills)}")
         expect(all(skill["path"].endswith("/SKILL.md") for skill in status_skills), "agent status did not expose standard skill paths")
 
-        admin_chat = client.post("/api/chat/stream", headers=admin_auth, json={"message": "hello"})
-        expect(admin_chat.status_code == 403, f"admin chat should be forbidden, got {admin_chat.status_code}")
-
-        chat = client.post("/api/chat/stream", headers=student_auth, json={"message": "帮我解释一下 Python 函数。"})
+        chat = client.post("/api/chat/stream", headers=student_headers, json={"message": "帮我解释一下 Python 函数。"})
         expect(chat.status_code == 200, f"student chat stream failed: {chat.status_code}")
         expect("event: meta" in chat.text and "event: done" in chat.text, "chat stream missing meta/done events")
         observed["chatStreamChars"] = len(chat.text)
 
-        student_reports = client.get("/api/admin/reports", headers=student_auth)
+        student_reports = client.get("/api/admin/reports")
         expect(student_reports.status_code == 403, f"student should not read admin reports: {student_reports.status_code}")
 
-        admin_reports = client.get("/api/admin/reports", headers=admin_auth)
+        admin_headers = login_headers(client, "admin", "admin123")
+        admin_reports = client.get("/api/admin/reports")
         expect(admin_reports.status_code == 200, f"admin reports failed: {admin_reports.status_code}")
 
         ingest = client.post(
             "/api/admin/knowledge",
-            headers=admin_auth,
+            headers=admin_headers,
             json={"source": "harness-note", "content": "考试焦虑时可以先做呼吸练习，并联系辅导员获得支持。"},
         )
         expect(ingest.status_code == 200, f"knowledge ingest failed: {ingest.status_code} {ingest.text}")
         expect(ingest.json()["chunks"] >= 1, "knowledge ingest did not create chunks")
 
-        status = client.get("/api/admin/knowledge/status", headers=admin_auth)
+        status = client.get("/api/admin/knowledge/status")
         expect(status.status_code == 200, f"knowledge status failed: {status.status_code}")
         expect(status.json()["databaseChunks"] >= 1, "knowledge status returned no chunks")
         observed["knowledgeStatus"] = {
@@ -551,9 +594,12 @@ def parse_sse(chunk: str) -> list[dict]:
     return events
 
 
-def basic_auth(username: str, password: str) -> dict[str, str]:
-    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
-    return {"Authorization": f"Basic {token}"}
+def login_headers(client, username: str, password: str) -> dict[str, str]:
+    response = client.post("/api/auth/login", json={"username": username, "password": password})
+    expect(response.status_code == 200, f"{username} login failed: {response.status_code} {response.text}")
+    csrf = client.cookies.get("mindbridge_csrf")
+    expect(bool(csrf), f"{username} login did not issue CSRF cookie")
+    return {"X-CSRF-Token": csrf}
 
 
 def expect(condition: bool, message: str) -> None:

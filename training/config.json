@@ -1,0 +1,19 @@
+{
+  "base_model": "Qwen/Qwen2.5-7B-Instruct",
+  "source_dataset": "data/lora/psychqa_synthetic.jsonl",
+  "split_dir": "data/lora/splits",
+  "output_dir": "models/mindbridge-qwen2.5-7b-lora",
+  "seed": 42,
+  "train_ratio": 0.8,
+  "validation_ratio": 0.1,
+  "test_ratio": 0.1,
+  "max_length": 512,
+  "epochs": 3,
+  "learning_rate": 0.0002,
+  "batch_size": 1,
+  "gradient_accumulation_steps": 16,
+  "lora_rank": 16,
+  "lora_alpha": 32,
+  "lora_dropout": 0.05,
+  "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+}

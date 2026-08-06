@@ -5,9 +5,9 @@
 - 学生端 SSE 流式聊天，前端可展示打字机式输出。
 - Argon2id 密码哈希与 JWT HttpOnly Cookie 登录，支持学生和管理员角色隔离、刷新令牌轮换与 CSRF 防护。
 - 事件驱动多 Agent 协作 runtime：Coordinator、Understanding、Safety、Context、Response 通过共享黑板、任务认领和安全审查协作。
-- 动态路由 RAG：先判断 `CHAT / CONSULT / RISK`，普通问题不查知识库，咨询和风险场景才进入检索增强。
+- 动态路由 RAG：意图只判断 `CHAT / CONSULT`，风险独立判断 `LOW / MEDIUM / HIGH`；普通低风险聊天不查知识库，咨询或中高风险场景进入检索增强。
 - Chroma 向量 RAG 知识库：支持 Markdown、txt、PDF 文件上传，自动切块，使用 `text-embedding-3-small` 写入向量库，并与 BM25 关键词召回融合后进入本地 reranker；向量不可用时保留本地 BM25 + 词面检索兜底。
-- 心理风险评估：高风险词典优先、LLM JSON 评估、关键词兜底。
+- 心理风险评估：可解释安全门优先、LLM JSON 评估、保守规则兜底，并附带独立风险评测集和混淆矩阵。
 - 后台报告：记录情绪标签、情绪分数、风险等级、置信度和摘要，但学生端不展示后台评估结果。
 - 数据闭环：咨询/风险消息完整写入 MySQL，短期上下文写入 Redis，高风险消息写入 Excel 台账并通过邮件发送预警。
 - 本地微调模型接入：支持通过 Ollama 加载 `mindbridge-qwen2.5-7b-ft-q4_k_m.gguf`。
@@ -81,10 +81,12 @@ TURN_STARTED
 各 Agent 分工：
 
 - `CoordinatorAgent`：维护任务板、预算、安全门槛、冲突仲裁和最终采纳。
-- `UnderstandingAgent`：判断 `CHAT / CONSULT / RISK`，发布 intent artifact。
+- `UnderstandingAgent`：判断 `CHAT / CONSULT`，发布 intent artifact；风险维度完全由 SafetyAgent 独立负责。
 - `SafetyAgent`：独立评估风险，必要时发布 `SAFETY_OVERRIDE`，并审查候选回复。
 - `ContextAgent`：按需聚合 Redis / MySQL 记忆、RAG 检索结果和 Skill 约束。
 - `ResponseAgent`：根据黑板 artifact 生成候选回复正文，等待安全审查和采纳。
+
+每个 Agent task 都在独立超时与重试边界中执行。本地 Ollama 连接失败、超时和上下文溢出会分类处理，采用指数退避与抖动重试；上下文溢出只压缩该任务的黑板视图。重试耗尽后发布带故障元数据的保守 artifact，单个 Agent 异常不会取消同轮其他 Agent，也不会直接中断整个 loop。中高风险回复必须先获得 ContextAgent 的 Skill/RAG artifact。
 
 ## 安装依赖
 
@@ -120,9 +122,22 @@ DATABASE_URL=mysql+pymysql://mindbridge:mindbridge@127.0.0.1:3306/mindbridge?cha
 REDIS_URL=redis://127.0.0.1:6379/0
 REDIS_MEMORY_TTL_SECONDS=86400
 REDIS_MEMORY_MAX_MESSAGES=40
+LONG_TERM_MEMORY_ENABLED=true
+LONG_TERM_MEMORY_MAX_ITEMS=200
+LONG_TERM_MEMORY_RELEVANT_ITEMS=5
+LONG_TERM_MEMORY_EXTRACT_MESSAGES=10
 ```
 
 完整聊天记录写入 MySQL 的 `chat_sessions`、`chat_messages` 等表。Redis 只保存每个会话最近 `REDIS_MEMORY_MAX_MESSAGES` 条短期上下文，并通过 `REDIS_MEMORY_TTL_SECONDS` 自动过期。
+
+跨会话长期记忆写入 MySQL 的 `long_term_memories` 表。每轮回复落库后，
+Outbox 经 RabbitMQ 将 `memory.extract` 任务交给通用 Celery worker；worker
+只沉淀稳定背景、互动偏好、明确有效的支持方式和长期事项。新一轮对话会加载
+记忆索引，并按当前输入选择最多 `LONG_TERM_MEMORY_RELEVANT_ITEMS` 条全文注入
+ContextAgent。手机号、邮箱、身份证、高风险原话和诊断标签不会保存，学生可在
+学生端查看并删除自己的长期记忆，也可关闭长期记忆并一次性清空已有内容。即使记忆条目少于注入上限，也必须经过模型索引选择或关键词相关性筛选，不再默认全量注入。
+
+默认仅持久化脱敏后的输入；可配置 Fernet 应用层静态加密。Celery Beat 每日执行保留策略：普通聊天正文默认保留 365 天，中高风险安全记录默认保留 1095 天，过期后清除正文而保留必要审计元数据。
 
 ## Docker Compose 一键启动
 
@@ -175,19 +190,17 @@ curl -u admin:admin123 -X POST http://127.0.0.1:8080/api/admin/knowledge/backup
 
 ## 工具队列、限流与死信
 
-心理报告生成后，工具链不会阻塞学生端流式回复，而是写入 `tool_jobs` 队列表：
+心理报告生成后，工具链不会阻塞学生端流式回复，而是在业务事务内写入 Transactional Outbox：
 
 ```text
 EXCEL_REPORT
 CASE_CREATE -> ALERT_SEND
 ```
 
-Excel 写入使用进程内锁串行化，个案创建保持幂等；预警发送使用独立线程池并支持每分钟限流。失败任务会按延迟重试，超过 `TOOL_QUEUE_MAX_ATTEMPTS` 后进入 `dead_letter_records`。
+Outbox 发布到 RabbitMQ 后由 Celery worker 消费。事件消费、Excel 写入和个案创建保持幂等；预警发送有每分钟限流。任务按指数退避重试，超过 `TOOL_TASK_MAX_ATTEMPTS` 后进入 `dead_letter_records`，后台可查看死信、认领个案并追加处置备注。
 
 ```env
-TOOL_QUEUE_ENABLED=true
-TOOL_QUEUE_EXCEL_WORKERS=1
-TOOL_QUEUE_EMAIL_WORKERS=2
+TOOL_TASK_MAX_ATTEMPTS=5
 ALERT_EMAIL_RATE_LIMIT_PER_MINUTE=30
 ALERT_EMAIL_DELIVERY_MODE=log
 ```
@@ -300,7 +313,11 @@ CHROMA_COLLECTION_NAME=mindbridge_knowledge
 学生流式聊天：
 
 ```bash
-curl -N -u student:student123 \
+curl -c student.cookies -H 'Content-Type: application/json' \
+  -d '{"username":"student","password":"student123"}' \
+  http://127.0.0.1:8080/api/auth/login
+CSRF=$(awk '$6 == "mindbridge_csrf" {print $7}' student.cookies)
+curl -N -b student.cookies -H "X-CSRF-Token: $CSRF" \
   -H 'Content-Type: application/json' \
   -d '{"message":"我最近很焦虑，晚上总是睡不着"}' \
   http://127.0.0.1:8080/api/chat/stream
@@ -309,7 +326,7 @@ curl -N -u student:student123 \
 高风险示例，会触发心理报告、风险个案创建和预警工具计划；Excel 保留为台账输出，邮件/log 是预警通道之一：
 
 ```bash
-curl -N -u student:student123 \
+curl -N -b student.cookies -H "X-CSRF-Token: $CSRF" \
   -H 'Content-Type: application/json' \
   -d '{"message":"我不想活了，感觉撑不下去了"}' \
   http://127.0.0.1:8080/api/chat/stream
@@ -318,13 +335,17 @@ curl -N -u student:student123 \
 管理员查看报告：
 
 ```bash
-curl -u admin:admin123 http://127.0.0.1:8080/api/admin/reports
+curl -c admin.cookies -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}' \
+  http://127.0.0.1:8080/api/auth/login
+curl -b admin.cookies http://127.0.0.1:8080/api/admin/reports
 ```
 
 管理员追加知识库：
 
 ```bash
-curl -u admin:admin123 \
+ADMIN_CSRF=$(awk '$6 == "mindbridge_csrf" {print $7}' admin.cookies)
+curl -b admin.cookies -H "X-CSRF-Token: $ADMIN_CSRF" \
   -H 'Content-Type: application/json' \
   -d '{"source":"sleep-guide","content":"失眠时可先固定起床时间，减少睡前屏幕刺激，必要时联系校心理中心。"}' \
   http://127.0.0.1:8080/api/admin/knowledge
@@ -343,6 +364,18 @@ AI_PROVIDER=mock python -m app.rag_eval.runner
 ```text
 target/rag-eval-report.json
 ```
+
+## 风险安全门评测
+
+```bash
+python -m app.risk_eval.runner
+```
+
+评测集覆盖直接意图、行动计划、隐性绝望、第三方求助、明确否认、研究/新闻语境和英文表达。报告输出到 `target/risk-eval-report.json`。这里的指标用于工程回归，不代表临床有效性。
+
+## LoRA 训练复现
+
+`training/` 提供去重、固定随机种子、标签分层切分、LoRA 训练和独立 test split 评测脚本。当前 2400 条数据会切为 1920/240/240，并在 `data/lora/splits/manifest.json` 记录源文件和各 split 的 SHA-256。完整命令与限制见 `training/README.md`。
 
 ## 单元测试
 
@@ -369,7 +402,7 @@ python -m unittest discover -s tests
 项目提供一键工程 harness，用 mock AI、临时 SQLite、内存短期记忆和本地输出验证核心链路：
 
 - Risk Safety Harness：高风险识别、报告生成、后台元数据不外显、事务 Outbox 事件生成。
-- Agent Routing Harness：通过 `MindBridgeAgentHarness` 验证 CHAT / CONSULT / RISK 路由和多 Agent 步骤。
+- Agent Routing Harness：通过 `MindBridgeAgentHarness` 验证 CHAT / CONSULT 与独立风险维度的路由和多 Agent 步骤。
 - Standard Skills Harness：验证 `skills/*/SKILL.md` 标准 Skill 加载、选择逻辑和交接摘要模板渲染。
 - RAG Harness：基于内置评测集验证 Recall@K、MRR、NDCG 和 HitRate。
 - API Harness：健康检查、认证授权、SSE 聊天、管理员知识库接口。
@@ -393,7 +426,7 @@ MCP Python 包建议使用 Python 3.10 或 3.11 安装运行。
 python -m app.mcp_tools.server
 ```
 
-业务后端触发报告后处理时，通过事务 Outbox、RabbitMQ 与 Celery worker 复用同一套工具实现。MCP server 可独立启动，供外部 MCP 客户端调用，但不参与 FastAPI 生产主链路。
+业务后端触发报告后处理时，通过事务 Outbox、RabbitMQ 与 Celery worker 执行。MCP server 可独立启动；其 Excel、个案和预警命令也必须进入同一个工具治理与 Outbox 边界，不再绕过生产可靠性链路直接产生副作用。
 
 暴露工具：
 

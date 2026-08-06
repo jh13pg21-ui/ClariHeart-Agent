@@ -2,6 +2,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.core.enums import IntentType, RiskLevel
+from app.services.skills import MindBridgeSkillLibrary
 from app.services.skills import MindBridgeSkillRegistry, SkillLoadError
 
 
@@ -47,6 +49,68 @@ class SkillRegistryTests(unittest.TestCase):
 
             with self.assertRaises(SkillLoadError):
                 MindBridgeSkillRegistry(root).get_required("bad")
+
+
+class SemanticSkillSelectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_semantic_selector_adds_only_whitelisted_optional_skills(self):
+        class Client:
+            async def complete(self, _):
+                return '{"skills":["sleep_routine_support","not_a_skill"]}'
+
+        selection = await MindBridgeSkillLibrary.select_response_skills(
+            IntentType.CONSULT,
+            RiskLevel.LOW,
+            "最近状态很差，想找人聊聊。",
+            Client(),
+        )
+
+        self.assertEqual(selection.strategy, "semantic_ranked")
+        self.assertIn("supportive_response_baseline", selection.names)
+        self.assertIn("referral_resource_guidance", selection.names)
+        self.assertIn("sleep_routine_support", selection.names)
+        self.assertNotIn("not_a_skill", selection.names)
+
+    async def test_high_risk_does_not_delegate_skill_choice_to_model(self):
+        class ExplodingClient:
+            async def complete(self, _):
+                raise AssertionError("high-risk selection must not call the model")
+
+        selection = await MindBridgeSkillLibrary.select_response_skills(
+            IntentType.RISK,
+            RiskLevel.HIGH,
+            "我不想活了。",
+            ExplodingClient(),
+        )
+
+        self.assertEqual(selection.strategy, "high_risk_hard_guard")
+        self.assertEqual(
+            selection.names,
+            ("supportive_response_baseline", "high_risk_safety_plan"),
+        )
+
+    async def test_rule_fallback_caps_multiple_optional_skills(self):
+        class EmptyClient:
+            async def complete(self, _):
+                return '{"skills":[]}'
+
+        selection = await MindBridgeSkillLibrary.select_response_skills(
+            IntentType.CONSULT,
+            RiskLevel.LOW,
+            "我因为考试焦虑，已经失眠好几天了。",
+            EmptyClient(),
+            max_optional=2,
+        )
+
+        self.assertEqual(selection.strategy, "rule_fallback_empty")
+        self.assertEqual(
+            selection.names,
+            (
+                "supportive_response_baseline",
+                "referral_resource_guidance",
+                "anxiety_grounding_support",
+                "sleep_routine_support",
+            ),
+        )
 
 
 if __name__ == "__main__":

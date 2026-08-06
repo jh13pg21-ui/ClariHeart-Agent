@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+import asyncio
+import json
+from datetime import datetime, timedelta
 from typing import Callable
 
 from sqlalchemy.exc import IntegrityError
@@ -11,11 +13,17 @@ from app.core.database import SessionLocal
 from app.core.enums import ToolJobKind, ToolJobStatus, ToolStatus
 from app.models.entities import (
     ProcessedMessage,
+    ChatMessage,
+    ChatSession,
+    AlertRecord,
+    DeadLetterRecord,
     PsychologicalReport,
     RiskCase,
     ToolJob,
 )
 from app.services.outbox import OutboxService
+from app.services.long_term_memory import LongTermMemoryService
+from app.services.privacy_retention import PrivacyRetentionService
 from app.services.tool_governance import ToolGovernanceService
 from app.services.tools import ToolOrchestrationService
 from app.workers.celery_app import celery_app
@@ -26,6 +34,92 @@ worker_settings = get_settings()
 
 class RetryableTaskError(RuntimeError):
     pass
+
+
+@celery_app.task(
+    name="app.workers.tasks.purge_expired_private_data",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+)
+def purge_expired_private_data() -> dict:
+    db: Session = SessionLocal()
+    try:
+        result = PrivacyRetentionService(db, worker_settings).purge_expired()
+        return {
+            "status": "SUCCESS",
+            "messages": result.messages,
+            "sessions": result.sessions,
+            "reports": result.reports,
+            "traces": result.traces,
+        }
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.workers.tasks.extract_long_term_memory",
+    autoretry_for=(RetryableTaskError,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=5,
+)
+def extract_long_term_memory(
+    event_id: str,
+    assistant_message_id: int,
+) -> dict:
+    db: Session = SessionLocal()
+    try:
+        marker = _claim_message(
+            db,
+            "extract_long_term_memory",
+            event_id,
+        )
+        if marker is None:
+            return {"status": "ALREADY_PROCESSED", "eventId": event_id}
+        message = db.get(ChatMessage, assistant_message_id)
+        if message is None:
+            db.commit()
+            return {
+                "status": "NOT_FOUND",
+                "eventId": event_id,
+                "messageId": assistant_message_id,
+            }
+        try:
+            stored = asyncio.run(
+                LongTermMemoryService(
+                    db,
+                    worker_settings,
+                ).extract_from_assistant_message(assistant_message_id)
+            )
+        except Exception as exc:
+            db.delete(marker)
+            db.commit()
+            raise RetryableTaskError(
+                f"长期记忆提取失败：{type(exc).__name__}: {exc}"
+            ) from exc
+        session = db.get(ChatSession, message.session_id)
+        if session is not None:
+            session.long_term_memory_extracted_message_id = message.id
+            db.add(session)
+        db.commit()
+        return {
+            "status": "SUCCESS",
+            "eventId": event_id,
+            "messageId": assistant_message_id,
+            "stored": len(stored),
+        }
+    except RetryableTaskError:
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def _claim_message(
@@ -44,18 +138,43 @@ def _claim_message(
 
 
 def _start_job(db: Session, report_id: int, kind: str) -> ToolJob:
-    job = ToolJob(
-        report_id=report_id,
-        kind=kind,
-        status=ToolJobStatus.RUNNING.value,
-        attempts=1,
-        max_attempts=5,
-        run_after=datetime.utcnow(),
-        last_error="",
+    job = (
+        db.query(ToolJob)
+        .filter(
+            ToolJob.report_id == report_id,
+            ToolJob.kind == kind,
+            ToolJob.status == ToolJobStatus.PENDING.value,
+        )
+        .order_by(ToolJob.id.desc())
+        .first()
     )
+    if job is None:
+        job = ToolJob(
+            report_id=report_id,
+            kind=kind,
+            attempts=0,
+            max_attempts=max(1, int(getattr(worker_settings, "tool_task_max_attempts", 5))),
+            run_after=datetime.utcnow(),
+            last_error="",
+        )
+    job.status = ToolJobStatus.RUNNING.value
+    job.attempts += 1
+    job.updated_at = datetime.utcnow()
     db.add(job)
     db.flush()
     return job
+
+
+def _dead_letter(db: Session, job: ToolJob, reason: str, payload: dict | None = None) -> DeadLetterRecord:
+    record = DeadLetterRecord(
+        job_id=job.id,
+        report_id=job.report_id,
+        kind=job.kind,
+        reason=reason[:2000],
+        payload=json.dumps(payload or {}, ensure_ascii=False, default=str),
+    )
+    db.add(record)
+    return record
 
 
 def _run_governed(
@@ -89,18 +208,41 @@ def _run_governed(
         try:
             result = operation(db, report, job)
         except RetryableTaskError as exc:
+            error = str(exc)
+            job.last_error = error
+            job.updated_at = datetime.utcnow()
+            if job.attempts >= job.max_attempts:
+                job.status = ToolJobStatus.DEAD.value
+                _dead_letter(
+                    db,
+                    job,
+                    error,
+                    {"eventId": event_id, "attempts": job.attempts},
+                )
+                governance.finish(audit, "DEAD", error)
+                db.commit()
+                return {
+                    "status": "DEAD",
+                    "eventId": event_id,
+                    "jobId": job.id,
+                    "reason": error,
+                }
             db.delete(marker)
             job.status = ToolJobStatus.PENDING.value
-            job.last_error = str(exc)
             job.run_after = datetime.utcnow()
-            job.updated_at = datetime.utcnow()
-            governance.finish(audit, "RETRY", str(exc))
+            governance.finish(audit, "RETRY", error)
             db.commit()
             raise
         except Exception as exc:
             job.status = ToolJobStatus.DEAD.value
             job.last_error = f"{type(exc).__name__}: {exc}"
             job.updated_at = datetime.utcnow()
+            _dead_letter(
+                db,
+                job,
+                job.last_error,
+                {"eventId": event_id, "attempts": job.attempts},
+            )
             governance.finish(audit, "FAILED", job.last_error)
             db.commit()
             raise
@@ -190,6 +332,17 @@ def send_high_risk_alert(event_id: str, case_id: int) -> dict:
         case = db.get(RiskCase, case_id)
         if case is None:
             raise ValueError(f"case {case_id} not found")
+        limit = max(1, int(getattr(worker_settings, "alert_email_rate_limit_per_minute", 30)))
+        delivered = (
+            db.query(AlertRecord)
+            .filter(
+                AlertRecord.status == ToolStatus.SUCCESS.value,
+                AlertRecord.created_at >= datetime.utcnow() - timedelta(minutes=1),
+            )
+            .count()
+        )
+        if delivered >= limit:
+            raise RetryableTaskError(f"高风险预警达到每分钟限流阈值 {limit}")
         record = ToolOrchestrationService(db, worker_settings).send_case_alert(case, commit=False)
         if record.status != ToolStatus.SUCCESS.value:
             raise RetryableTaskError(record.message)

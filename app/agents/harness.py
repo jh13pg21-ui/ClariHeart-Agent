@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from typing import Awaitable, Callable
 
 from sqlalchemy.orm import Session
 
@@ -13,10 +14,12 @@ from app.models.entities import ChatMessage, ChatSession, PsychologicalReport, U
 from app.schemas.dtos import AiMessage, ChatRequest
 from app.services.assessment import PsychologyAssessment
 from app.services.knowledge import SearchResult
+from app.services.long_term_memory import LongTermMemoryService
 from app.services.memory import RedisShortTermMemoryStore
 from app.services.outbox import OutboxService
 from app.services.privacy import PrivacySanitizer
 from app.services.trace import AgentTraceService
+from app.services.data_protection import SensitiveTextProtector
 from app.services.output_safety import OutputSafetyDecision
 
 
@@ -60,23 +63,33 @@ class MindBridgeAgentHarness:
         self.db = db
         self.settings = settings
         self.privacy = PrivacySanitizer()
+        self.protector = SensitiveTextProtector(settings)
         self.memory = RedisShortTermMemoryStore(settings)
 
-    async def run(self, user: UserAccount, request: ChatRequest) -> AgentHarnessOutcome:
+    async def run(
+        self,
+        user: UserAccount,
+        request: ChatRequest,
+        response_token_sink: Callable[[str], Awaitable[None]] | None = None,
+        session_sink: Callable[[ChatSession], Awaitable[None]] | None = None,
+    ) -> AgentHarnessOutcome:
         original_input = request.message.strip()
         model_input = self.privacy.sanitize(original_input)
         session = self._resolve_session(user, request.sessionId, original_input)
+        if session_sink is not None:
+            await session_sink(session)
         agent_run = await create_agent_runtime(self.db, self.settings).run(
             user,
             session,
             original_input,
             model_input,
+            response_token_sink=response_token_sink,
         )
         risk_level = agent_run.risk_level.value
         try:
             self._add_message(user, session, MessageRole.USER, original_input)
             report = self._create_report(user, session, original_input, agent_run)
-            trace = AgentTraceService(self.db).save_run(
+            trace = AgentTraceService(self.db, self.settings).save_run(
                 user=user,
                 session=session,
                 original_input=original_input,
@@ -111,18 +124,69 @@ class MindBridgeAgentHarness:
             trace_id=trace.id,
         )
 
-    def save_assistant_message(self, user: UserAccount, session: ChatSession, content: str) -> None:
-        self.save_message(user, session, MessageRole.ASSISTANT, content)
+    def save_assistant_message(
+        self,
+        user: UserAccount,
+        session: ChatSession,
+        content: str,
+        extract_long_term_memory: bool = True,
+    ) -> None:
+        message = self._add_message(
+            user,
+            session,
+            MessageRole.ASSISTANT,
+            content,
+        )
+        self.db.flush()
+        if extract_long_term_memory and LongTermMemoryService(
+            self.db,
+            self.settings,
+        ).should_schedule_extraction(session, message):
+            OutboxService.add_event(
+                self.db,
+                "memory.extract",
+                "chat_message",
+                message.id,
+                {"riskLevel": RiskLevel.LOW.value},
+                f"memory.extract:{message.id}",
+            )
+        self.db.commit()
+        self.memory.append(
+            session.public_id,
+            MessageRole.ASSISTANT.value,
+            content,
+        )
 
     def save_message(self, user: UserAccount, session: ChatSession, role: MessageRole, content: str) -> None:
         self._add_message(user, session, role, content)
         self.db.commit()
         self.memory.append(session.public_id, role.value, content)
 
-    def _add_message(self, user: UserAccount, session: ChatSession, role: MessageRole, content: str) -> None:
-        self.db.add(ChatMessage(user_id=user.id, session_id=session.id, role=role.value, content=content))
+    def _add_message(
+        self,
+        user: UserAccount,
+        session: ChatSession,
+        role: MessageRole,
+        content: str,
+    ) -> ChatMessage:
+        privacy = getattr(self, "privacy", None) or PrivacySanitizer()
+        protector = getattr(self, "protector", None) or SensitiveTextProtector(self.settings)
+        safe_content = privacy.sanitize(content)
+        stored_content = (
+            content
+            if getattr(self.settings, "privacy_store_original_input", False)
+            else safe_content
+        )
+        message = ChatMessage(
+            user_id=user.id,
+            session_id=session.id,
+            role=role.value,
+            content=protector.protect(stored_content),
+        )
+        self.db.add(message)
         session.touch()
         self.db.add(session)
+        return message
 
     def _resolve_session(self, user: UserAccount, public_id: str | None, text: str) -> ChatSession:
         if public_id:
@@ -130,7 +194,7 @@ class MindBridgeAgentHarness:
             if session is None:
                 raise ValueError("Session not found")
             return session
-        session = ChatSession(public_id=uuid.uuid4().hex, user_id=user.id, title=text[:36])
+        session = ChatSession(public_id=uuid.uuid4().hex, user_id=user.id, title=self.privacy.sanitize(text)[:36])
         self.db.add(session)
         self.db.flush()
         return session
@@ -141,7 +205,11 @@ class MindBridgeAgentHarness:
         report = PsychologicalReport(
             user_id=user.id,
             session_id=session.id,
-            content=text,
+            content=self.protector.protect(
+                text
+                if getattr(self.settings, "privacy_store_original_input", False)
+                else self.privacy.sanitize(text)
+            ),
             intent=agent_run.intent.value,
             emotion=agent_run.assessment.emotion.value,
             emotion_score=agent_run.assessment.emotion_score,

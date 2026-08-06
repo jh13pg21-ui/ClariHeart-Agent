@@ -19,6 +19,9 @@ class AgentEventType(str, Enum):
     FINAL_ACCEPTED = "FINAL_ACCEPTED"
     ROUND_STARTED = "ROUND_STARTED"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
+    TASK_RETRY_SCHEDULED = "TASK_RETRY_SCHEDULED"
+    TASK_FAILED = "TASK_FAILED"
+    TASK_FALLBACK_PUBLISHED = "TASK_FALLBACK_PUBLISHED"
 
 
 class TaskStatus(str, Enum):
@@ -26,6 +29,8 @@ class TaskStatus(str, Enum):
     CLAIMED = "CLAIMED"
     BLOCKED = "BLOCKED"
     CLOSED = "CLOSED"
+    RETRYING = "RETRYING"
+    FAILED = "FAILED"
 
 
 class TaskPriority(str, Enum):
@@ -55,17 +60,31 @@ class AgentTask:
     claimed_by: tuple[str, ...] = field(default_factory=tuple)
     depends_on: tuple[str, ...] = field(default_factory=tuple)
     metadata: dict[str, Any] = field(default_factory=dict)
+    attempts: int = 0
+    max_attempts: int = 2
+    last_error: str = ""
 
     def claim(self, agent_name: str) -> "AgentTask":
         if agent_name in self.claimed_by:
             return self
-        return replace(self, status=TaskStatus.CLAIMED, claimed_by=(*self.claimed_by, agent_name))
+        return replace(
+            self,
+            status=TaskStatus.CLAIMED,
+            claimed_by=(*self.claimed_by, agent_name),
+            attempts=self.attempts + 1,
+        )
 
     def reopen(self) -> "AgentTask":
         return replace(self, status=TaskStatus.OPEN)
 
     def close(self) -> "AgentTask":
         return replace(self, status=TaskStatus.CLOSED)
+
+    def retry(self, error: str) -> "AgentTask":
+        return replace(self, status=TaskStatus.RETRYING, last_error=error)
+
+    def fail(self, error: str) -> "AgentTask":
+        return replace(self, status=TaskStatus.FAILED, last_error=error)
 
 
 @dataclass(frozen=True)
@@ -115,6 +134,8 @@ class AgentTurnResult:
     tasks: tuple[AgentTask, ...] = field(default_factory=tuple)
     events: tuple[AgentEvent, ...] = field(default_factory=tuple)
     close_task: bool = True
+    task_status: TaskStatus | None = None
+    task_error: str = ""
 
 
 @dataclass(frozen=True)
@@ -181,7 +202,11 @@ class CollaborationBlackboard:
                         message=follow_up.title,
                     )
                 )
-        if result.close_task:
+        if result.task_status == TaskStatus.FAILED:
+            board = board.update_task(task.fail(result.task_error))
+        elif result.task_status == TaskStatus.RETRYING:
+            board = board.update_task(task.retry(result.task_error))
+        elif result.close_task:
             board = board.update_task(task.close()).append_event(
                 AgentEvent(type=AgentEventType.TASK_CLOSED, actor=agent_name, task_id=task.id, message=task.title)
             )

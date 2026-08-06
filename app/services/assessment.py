@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from app.core.enums import EmotionLabel, RiskLevel
 from app.schemas.dtos import AiMessage
 from app.services.ai import AiClient, PromptTemplates, has_consult_signal, has_high_risk_signal
+from app.services.risk_rules import detect_risk_signal
 
 
 @dataclass
@@ -22,8 +23,9 @@ class PsychologicalAssessmentService:
         self.ai = ai
 
     async def assess(self, text: str, history: list[AiMessage] | None = None) -> PsychologyAssessment:
-        if has_high_risk_signal(text):
-            return PsychologyAssessment(EmotionLabel.HIGH_RISK, 4.0, RiskLevel.HIGH, 0.95, "检测到明确高风险表达")
+        rule = detect_risk_signal(text)
+        if rule.level == RiskLevel.HIGH:
+            return PsychologyAssessment(EmotionLabel.HIGH_RISK, 4.0, RiskLevel.HIGH, 0.97, rule.reason)
         try:
             raw = await self.ai.complete(PromptTemplates.psychology_prompt(history or [], text))
             start = raw.find("{")
@@ -38,9 +40,20 @@ class PsychologicalAssessmentService:
                 risk = score_risk
             if emotion == EmotionLabel.HIGH_RISK:
                 risk = RiskLevel.HIGH
+            if rule.level == RiskLevel.MEDIUM and risk == RiskLevel.LOW:
+                risk = RiskLevel.MEDIUM
             return PsychologyAssessment(emotion, score, risk, confidence, data.get("summary", "模型评估结果"))
         except Exception:
-            return heuristic(text)
+            fallback = heuristic(text)
+            if rule.level == RiskLevel.MEDIUM and fallback.risk == RiskLevel.LOW:
+                return PsychologyAssessment(
+                    fallback.emotion,
+                    max(fallback.emotion_score, 3.0),
+                    RiskLevel.MEDIUM,
+                    0.82,
+                    rule.reason,
+                )
+            return fallback
 
 
 def heuristic(text: str) -> PsychologyAssessment:

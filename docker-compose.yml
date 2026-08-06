@@ -47,6 +47,19 @@ services:
       timeout: 5s
       retries: 30
 
+  migrate:
+    build:
+      context: .
+      target: production
+    command: python -m app.cli.migrate upgrade
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-migrate-secret-key-at-least-32-bytes}
+    restart: "no"
+
   app:
     build:
       context: .
@@ -56,6 +69,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       AGENT_FRAMEWORK: ${AGENT_FRAMEWORK:-event_driven_multi_agent}
       AI_PROVIDER: ${AI_PROVIDER:-ollama}
@@ -72,9 +87,9 @@ services:
       CHROMA_PERSIST_DIR: /app/data/chroma
       CHROMA_SNAPSHOT_DIR: /app/data/chroma-snapshots
       CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-mindbridge_knowledge}
-      TOOL_QUEUE_ENABLED: "false"
-      TOOL_QUEUE_EXCEL_WORKERS: ${TOOL_QUEUE_EXCEL_WORKERS:-1}
-      TOOL_QUEUE_EMAIL_WORKERS: ${TOOL_QUEUE_EMAIL_WORKERS:-2}
+      PRIVACY_STORE_ORIGINAL_INPUT: ${PRIVACY_STORE_ORIGINAL_INPUT:-false}
+      PRIVACY_REQUIRE_ENCRYPTION_AT_REST: ${PRIVACY_REQUIRE_ENCRYPTION_AT_REST:-false}
+      SENSITIVE_DATA_ENCRYPTION_KEY: ${SENSITIVE_DATA_ENCRYPTION_KEY:-}
       ALERT_EMAIL_DELIVERY_MODE: ${ALERT_EMAIL_DELIVERY_MODE:-log}
       ALERT_EMAIL_RATE_LIMIT_PER_MINUTE: ${ALERT_EMAIL_RATE_LIMIT_PER_MINUTE:-30}
       EXCEL_PATH: /app/data/mindbridge-risk-ledger.xlsx
@@ -96,11 +111,26 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
+      AI_PROVIDER: ${AI_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-mindbridge-qwen2.5-7b-ft:latest}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
       DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
       REDIS_URL: redis://redis:6379/0
       RABBITMQ_URL: amqp://mindbridge:mindbridge@rabbitmq:5672//
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      LONG_TERM_MEMORY_ENABLED: ${LONG_TERM_MEMORY_ENABLED:-true}
+      LONG_TERM_MEMORY_MAX_ITEMS: ${LONG_TERM_MEMORY_MAX_ITEMS:-200}
+      LONG_TERM_MEMORY_RELEVANT_ITEMS: ${LONG_TERM_MEMORY_RELEVANT_ITEMS:-5}
+      LONG_TERM_MEMORY_EXTRACT_MESSAGES: ${LONG_TERM_MEMORY_EXTRACT_MESSAGES:-10}
+      PRIVACY_STORE_ORIGINAL_INPUT: ${PRIVACY_STORE_ORIGINAL_INPUT:-false}
+      PRIVACY_REQUIRE_ENCRYPTION_AT_REST: ${PRIVACY_REQUIRE_ENCRYPTION_AT_REST:-false}
+      SENSITIVE_DATA_ENCRYPTION_KEY: ${SENSITIVE_DATA_ENCRYPTION_KEY:-}
       EXCEL_PATH: /app/data/mindbridge-risk-ledger.xlsx
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
     volumes:
@@ -119,6 +149,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
       REDIS_URL: redis://redis:6379/0
@@ -131,6 +163,32 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      SENSITIVE_DATA_ENCRYPTION_KEY: ${SENSITIVE_DATA_ENCRYPTION_KEY:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
+    restart: unless-stopped
+
+  worker-beat:
+    build:
+      context: .
+      target: production
+    command: celery -A app.workers.celery_app:celery_app beat --loglevel=INFO
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://mindbridge:mindbridge@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CHAT_DATA_RETENTION_DAYS: ${CHAT_DATA_RETENTION_DAYS:-365}
+      RISK_DATA_RETENTION_DAYS: ${RISK_DATA_RETENTION_DAYS:-1095}
+      SENSITIVE_DATA_ENCRYPTION_KEY: ${SENSITIVE_DATA_ENCRYPTION_KEY:-}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
     restart: unless-stopped
 
@@ -146,12 +204,15 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
       RABBITMQ_URL: amqp://mindbridge:mindbridge@rabbitmq:5672//
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       OUTBOX_PUBLISHER_BATCH_SIZE: ${OUTBOX_PUBLISHER_BATCH_SIZE:-50}
       OUTBOX_PUBLISHER_POLL_SECONDS: ${OUTBOX_PUBLISHER_POLL_SECONDS:-1}
+      OUTBOX_PUBLISHER_MAX_ATTEMPTS: ${OUTBOX_PUBLISHER_MAX_ATTEMPTS:-10}
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
     restart: unless-stopped
 

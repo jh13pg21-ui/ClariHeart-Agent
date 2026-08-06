@@ -77,6 +77,7 @@ class AdminReadApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/admin/reports").status_code, 200)
         self.assertEqual(self.client.get("/api/admin/agent-traces").status_code, 200)
         self.assertEqual(self.client.get("/api/admin/tool-audits").status_code, 200)
+        self.assertEqual(self.client.get("/api/admin/outbox-events").status_code, 200)
 
     def test_conversation_read_audits_success_not_found_and_error_without_content(self):
         self.assertEqual(self.client.get("/api/admin/conversations/session-ok").status_code, 200)

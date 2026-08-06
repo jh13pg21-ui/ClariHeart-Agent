@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     agent_max_claims_per_round: int = 4
     agent_max_claims_per_agent: int = 3
     agent_final_acceptance_min_confidence: float = 0.6
+    agent_task_timeout_seconds: float = 70.0
+    agent_task_max_attempts: int = 2
+    agent_retry_base_seconds: float = 0.2
+    agent_retry_max_seconds: float = 2.0
+    agent_retry_jitter_ratio: float = 0.25
     agent_model_default_provider: str = ""
     agent_model_default_model: str = ""
     agent_model_coordinator_provider: str = ""
@@ -61,6 +66,8 @@ class Settings(BaseSettings):
     rag_eval_output: str = "target/rag-eval-report.json"
     rag_eval_enabled: bool = False
     rag_eval_exit_after_run: bool = False
+    risk_eval_dataset: str = "app/risk_eval/mindbridge-risk-eval.json"
+    risk_eval_output: str = "target/risk-eval-report.json"
     excel_path: str = "data/mindbridge-risk-ledger.xlsx"
     redis_url: str = "redis://127.0.0.1:6379/0"
     rabbitmq_url: str = "amqp://mindbridge:mindbridge@127.0.0.1:5672//"
@@ -70,12 +77,21 @@ class Settings(BaseSettings):
     celery_alert_queue: str = "mindbridge.alert"
     outbox_publisher_batch_size: int = 50
     outbox_publisher_poll_seconds: float = 1.0
+    outbox_publisher_max_attempts: int = 10
     redis_memory_ttl_seconds: int = 86400
     redis_memory_max_messages: int = 40
     redis_socket_timeout_seconds: float = 2.0
     memory_compaction_enabled: bool = True
     memory_compaction_recent_messages: int = 8
+    memory_summary_refresh_messages: int = 4
     memory_summary_max_chars: int = 500
+    skill_semantic_selection_enabled: bool = True
+    skill_semantic_selection_max_optional: int = 2
+    long_term_memory_enabled: bool = True
+    long_term_memory_max_items: int = 200
+    long_term_memory_relevant_items: int = 5
+    long_term_memory_extract_messages: int = 10
+    long_term_memory_extract_min_new_messages: int = 6
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""
@@ -88,6 +104,14 @@ class Settings(BaseSettings):
     alert_email_to: str = ""
     alert_email_subject_prefix: str = "[MindBridge 高风险预警]"
     alert_email_rate_limit_per_minute: int = 30
+    tool_task_max_attempts: int = 5
+    mcp_allowed_actors: str = "admin,counselor"
+    privacy_store_original_input: bool = False
+    privacy_require_encryption_at_rest: bool = False
+    sensitive_data_encryption_key: str = ""
+    chat_data_retention_days: int = 365
+    risk_data_retention_days: int = 1095
+    privacy_retention_enabled: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -100,6 +124,12 @@ class Settings(BaseSettings):
             raise ValueError("JWT_ALGORITHM 必须为 HS256")
         if self.app_environment.lower() != "test" and len(self.jwt_secret_key.encode("utf-8")) < 32:
             raise ValueError("非测试环境必须通过 JWT_SECRET_KEY 提供至少 32 字节的 JWT 密钥")
+        if self.privacy_require_encryption_at_rest and not self.sensitive_data_encryption_key:
+            raise ValueError("启用静态加密要求后必须配置 SENSITIVE_DATA_ENCRYPTION_KEY")
+        if self.sensitive_data_encryption_key:
+            from app.services.data_protection import SensitiveTextProtector
+
+            SensitiveTextProtector(self)
 
 
 @lru_cache

@@ -2,7 +2,11 @@ import unittest
 from types import SimpleNamespace
 
 from app.schemas.dtos import AiMessage
-from app.services.memory import compact_history_for_prompt, summarize_history_for_memory
+from app.services.memory import (
+    ConversationSummaryState,
+    compact_history_for_prompt,
+    summarize_history_for_memory,
+)
 
 
 def settings(**overrides):
@@ -16,6 +20,28 @@ def settings(**overrides):
 
 
 class MemoryCompactionTests(unittest.TestCase):
+    def test_summary_state_refreshes_only_after_four_new_messages(self):
+        history = [
+            AiMessage(
+                role="user" if index % 2 == 0 else "assistant",
+                content=f"消息{index}",
+            )
+            for index in range(12)
+        ]
+        summary_settings = settings(memory_compaction_recent_messages=8)
+        state = ConversationSummaryState.from_history(history[:8], summary_settings)
+
+        before_threshold = state.advance(history[8:10], summary_settings)
+        after_threshold = before_threshold.advance(history[10:12], summary_settings)
+
+        self.assertEqual(before_threshold.summary, "")
+        self.assertEqual(len(before_threshold.tail), 10)
+        self.assertNotEqual(after_threshold.summary, "")
+        self.assertEqual(
+            [message.content for message in after_threshold.tail],
+            [f"消息{index}" for index in range(4, 12)],
+        )
+
     def test_compaction_keeps_recent_messages_and_adds_internal_summary(self):
         history = [AiMessage(role="user" if i % 2 == 0 else "assistant", content=f"第{i}条消息 13800138000") for i in range(10)]
 

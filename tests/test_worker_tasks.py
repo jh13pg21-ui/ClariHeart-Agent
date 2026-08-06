@@ -16,6 +16,8 @@ from app.models.entities import (
     RiskCase,
     ToolAuditRecord,
     UserAccount,
+    DeadLetterRecord,
+    ToolJob,
 )
 from app.workers import tasks
 
@@ -130,6 +132,48 @@ class WorkerTaskTests(unittest.TestCase):
         from app.models.entities import OutboxEvent
 
         self.assertEqual(db.query(OutboxEvent).filter_by(event_type="case.created").count(), 1)
+        db.close()
+
+    def test_retry_exhaustion_creates_dead_letter_and_terminal_job(self):
+        self.settings.tool_task_max_attempts = 1
+        failed_record = type("Record", (), {"status": "FAILED", "message": "磁盘暂时不可写"})()
+        with (
+            patch.object(tasks, "SessionLocal", self.Session),
+            patch.object(tasks, "worker_settings", self.settings),
+            patch.object(tasks.ToolOrchestrationService, "write_excel", return_value=failed_record),
+        ):
+            result = tasks.process_excel.run("event-dead", self.low_report_id)
+
+        db = self.Session()
+        self.assertEqual(result["status"], "DEAD")
+        self.assertEqual(db.query(DeadLetterRecord).count(), 1)
+        self.assertEqual(db.query(ToolJob).filter_by(status="DEAD").count(), 1)
+        db.close()
+
+    def test_alert_rate_limit_is_enforced_before_delivery(self):
+        self.settings.tool_task_max_attempts = 1
+        self.settings.alert_email_rate_limit_per_minute = 1
+        db = self.Session()
+        db.add(AlertRecord(report_id=self.low_report_id, channel="email", recipient="x", status="SUCCESS", message="sent"))
+        case = RiskCase(
+            report_id=self.high_report_id,
+            risk_level="HIGH",
+            status="OPEN",
+            owner="owner",
+            summary="high",
+            handoff_summary="handoff",
+        )
+        db.add(case)
+        db.commit()
+        case_id = case.id
+        db.close()
+
+        with patch.object(tasks, "SessionLocal", self.Session), patch.object(tasks, "worker_settings", self.settings):
+            result = tasks.send_high_risk_alert.run("event-limited", case_id)
+
+        db = self.Session()
+        self.assertEqual(result["status"], "DEAD")
+        self.assertIn("限流", db.query(DeadLetterRecord).one().reason)
         db.close()
 
 

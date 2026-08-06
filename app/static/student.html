@@ -28,6 +28,33 @@
 
   <main class="student-layout">
     <aside class="student-rail">
+      <section class="panel history-panel">
+        <div class="history-head">
+          <div>
+            <p class="panel-label">HISTORY</p>
+            <h2>历史会话</h2>
+          </div>
+          <button id="historyRefresh" class="history-refresh" type="button" aria-label="刷新历史会话">刷新</button>
+        </div>
+        <div id="conversationList" class="history-list" aria-live="polite">
+          <p class="history-empty">正在读取历史会话…</p>
+        </div>
+      </section>
+
+      <section class="panel memory-panel">
+        <div class="history-head">
+          <div>
+            <p class="panel-label">LONG-TERM MEMORY</p>
+            <h2>长期记忆</h2>
+          </div>
+          <button id="memoryRefresh" class="history-refresh" type="button" aria-label="刷新长期记忆">刷新</button>
+        </div>
+        <p class="memory-note">只保存跨会话有用的稳定信息，你可以随时删除。</p>
+        <div id="memoryList" class="memory-list" aria-live="polite">
+          <p class="history-empty">正在读取长期记忆…</p>
+        </div>
+      </section>
+
       <section class="panel">
         <p class="panel-label">QUICK SIGNAL</p>
         <button class="signal" type="button" data-quick="我最近压力很大，晚上总是睡不着。">压力失眠</button>
@@ -52,7 +79,7 @@
       <div class="chat-head">
         <div>
           <p class="panel-label">STUDENT CHAT</p>
-          <h2>心理陪伴对话</h2>
+          <h2 id="conversationTitle">心理陪伴对话</h2>
         </div>
         <span id="sessionBadge" class="pill">READY</span>
       </div>
@@ -72,6 +99,7 @@
     </section>
   </main>
 
-  <script src="/student.js?v=role-split-20260617"></script>
+  <script src="/markdown.js?v=safe-markdown-20260729"></script>
+  <script src="/student.js?v=long-memory-20260729"></script>
 </body>
 </html>

@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import asdict, is_dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from sqlalchemy.orm import Session
 
@@ -27,6 +27,7 @@ from app.schemas.dtos import AiMessage
 from app.services.agent_models import AgentModelRegistry
 from app.services.ai import AiClient, PromptTemplates
 from app.services.knowledge import KnowledgeService, SearchResult
+from app.services.long_term_memory import LongTermMemoryService
 from app.services.memory import RedisShortTermMemoryStore
 from app.services.output_safety import (
     OutputSafetyDecision,
@@ -51,10 +52,22 @@ class EventDrivenAgentRuntimeService:
         self.ai = AiClient(settings)
         self.knowledge = KnowledgeService(db, settings)
         self.memory = RedisShortTermMemoryStore(settings)
+        self.long_term_memory = LongTermMemoryService(
+            db,
+            settings,
+            ai=self.ai,
+        )
         self.model_registry = AgentModelRegistry(settings)
         self.private_memory = AgentPrivateMemory(settings)
 
-    async def run(self, user: UserAccount, session: ChatSession, original_input: str, model_input: str) -> AgentRunResult:
+    async def run(
+        self,
+        user: UserAccount,
+        session: ChatSession,
+        original_input: str,
+        model_input: str,
+        response_token_sink: Callable[[str], Awaitable[None]] | None = None,
+    ) -> AgentRunResult:
         services = AgentRuntimeServices(
             db=self.db,
             settings=self.settings,
@@ -64,7 +77,9 @@ class EventDrivenAgentRuntimeService:
             model_registry=self.model_registry,
             memory=self.memory,
             private_memory=self.private_memory,
+            long_term_memory=self.long_term_memory,
             knowledge=self.knowledge,
+            response_token_sink=response_token_sink,
         )
         coordinator_agent = CoordinatorAgent(services)
         agents = [
@@ -145,13 +160,12 @@ class EventDrivenAgentRuntimeService:
         )
 
     def _select_intent(self, board: CollaborationBlackboard) -> IntentType:
-        if any(event.type == AgentEventType.SAFETY_OVERRIDE for event in board.events):
-            return IntentType.RISK
         artifact = board.latest_artifact("intent")
         if not artifact:
             return IntentType.CHAT
         try:
-            return IntentType(str(artifact.payload.get("intent", IntentType.CHAT.value)).upper())
+            intent = IntentType(str(artifact.payload.get("intent", IntentType.CHAT.value)).upper())
+            return IntentType.CONSULT if intent == IntentType.RISK else intent
         except ValueError:
             return IntentType.CHAT
 

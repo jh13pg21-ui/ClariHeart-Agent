@@ -15,7 +15,9 @@ const els = {
   metricExcel: document.querySelector("#metricExcel"),
   metricAlerts: document.querySelector("#metricAlerts"),
   cases: document.querySelector("#cases"),
+  casesCount: document.querySelector("#casesCount"),
   reports: document.querySelector("#reports"),
+  reportsCount: document.querySelector("#reportsCount"),
   conversationState: document.querySelector("#conversationState"),
   conversationDetail: document.querySelector("#conversationDetail"),
   knowledgeState: document.querySelector("#knowledgeState"),
@@ -127,6 +129,8 @@ async function loadAdminDashboard() {
   els.metricCases.textContent = cases.length;
   els.metricExcel.textContent = excel.length;
   els.metricAlerts.textContent = alerts.length;
+  els.casesCount.textContent = `${cases.length} 条`;
+  els.reportsCount.textContent = `${reports.length} 条`;
   renderCases(cases);
   renderReports(reports);
 }
@@ -211,6 +215,7 @@ async function loadConversation(sessionId) {
     els.conversationState.textContent = "该报告缺少会话 ID";
     return;
   }
+  window.MindBridgeAdminPanels.open(document, "archive", localStorage, { scroll: true });
   els.conversationState.textContent = "正在读取...";
   els.conversationDetail.innerHTML = `<div class="empty small"><strong>加载中</strong><p>正在读取历史消息。</p></div>`;
   for (const card of els.reports.querySelectorAll(".report")) {
@@ -324,6 +329,7 @@ els.knowledgeUploadForm.addEventListener("submit", uploadKnowledgeFile);
 els.rebuildVector.addEventListener("click", () => runKnowledgeAction("rebuild"));
 els.backupVector.addEventListener("click", () => runKnowledgeAction("backup"));
 
+window.MindBridgeAdminPanels.bind(document, localStorage);
 checkHealth();
 loadProfile().then((profile) => {
   if (!profile) return;

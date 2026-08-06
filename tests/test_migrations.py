@@ -19,7 +19,13 @@ LEGACY_TABLES = {
     "excel_records", "tool_jobs", "dead_letter_records", "agent_run_traces",
     "tool_audit_records",
 }
-NEW_TABLES = {"auth_sessions", "security_audit_records", "outbox_events", "processed_messages"}
+NEW_TABLES = {
+    "auth_sessions",
+    "security_audit_records",
+    "outbox_events",
+    "processed_messages",
+    "long_term_memories",
+}
 
 
 def create_legacy_schema(url: str) -> None:
@@ -37,7 +43,11 @@ def create_legacy_schema(url: str) -> None:
     Table("dead_letter_records", metadata, Column("id", Integer, primary_key=True), Column("job_id", Integer), Column("report_id", Integer), Column("kind", String(64)), Column("reason", Text), Column("payload", Text), Column("created_at", DateTime))
     Table("agent_run_traces", metadata, Column("id", Integer, primary_key=True), Column("user_id", Integer), Column("session_id", Integer), Column("report_id", Integer), Column("intent", String(32)), Column("risk_level", String(32)), Column("original_input", Text), Column("sanitized_input", Text), Column("memory_brief", Text), Column("agent_steps_json", Text), Column("retrieved_knowledge_json", Text), Column("response_messages_json", Text), Column("assessment_json", Text), Column("created_at", DateTime))
     Table("tool_audit_records", metadata, Column("id", Integer, primary_key=True), Column("job_id", Integer), Column("report_id", Integer), Column("tool_name", String(64)), Column("policy", String(128)), Column("allowed", Integer), Column("status", String(32)), Column("reason", Text), Column("payload", Text), Column("created_at", DateTime), Column("updated_at", DateTime))
-    metadata.create_all(create_engine(url))
+    engine = create_engine(url)
+    try:
+        metadata.create_all(engine)
+    finally:
+        engine.dispose()
 
 
 def create_exact_legacy_schema(url: str) -> None:
@@ -164,6 +174,23 @@ def run_check(url: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run([sys.executable, "-m", "app.cli.migrate", "check"], cwd=ROOT, env=environment, text=True, capture_output=True)
 
 
+def table_names(url: str) -> list[str]:
+    engine = create_engine(url)
+    try:
+        return inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def scalar_sql(url: str, statement: str):
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            return connection.execute(text(statement)).scalar_one()
+    finally:
+        engine.dispose()
+
+
 class MigrationWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -178,30 +205,39 @@ class MigrationWorkflowTests(unittest.TestCase):
     def test_upgrade_creates_schema_on_empty_database(self):
         result = run_upgrade(self.empty_url)
         self.assertEqual(result.returncode, 0, result.stderr)
-        inspector = inspect(create_engine(self.empty_url))
-        self.assertTrue(LEGACY_TABLES | NEW_TABLES <= set(inspector.get_table_names()))
-        columns = {column["name"] for column in inspector.get_columns("user_accounts")}
-        self.assertTrue({"password_algorithm", "must_reset_password", "disabled"} <= columns)
+        engine = create_engine(self.empty_url)
+        try:
+            inspector = inspect(engine)
+            self.assertTrue(LEGACY_TABLES | NEW_TABLES <= set(inspector.get_table_names()))
+            columns = {column["name"] for column in inspector.get_columns("user_accounts")}
+            self.assertTrue({"password_algorithm", "must_reset_password", "disabled"} <= columns)
+        finally:
+            engine.dispose()
 
     def test_upgrade_preserves_existing_rows(self):
         create_exact_legacy_schema(self.legacy_url)
         engine = create_engine(self.legacy_url)
-        with engine.begin() as connection:
-            connection.execute(text("INSERT INTO user_accounts (id, username, display_name, password_hash, roles_csv, created_at) VALUES (1, 'student', 'Student', 'old-hash', 'ROLE_USER', CURRENT_TIMESTAMP)"))
-            connection.execute(text("INSERT INTO chat_sessions (id, public_id, title, user_id, created_at, updated_at) VALUES (1, 'legacy-session', 'Legacy', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"))
-            connection.execute(text("INSERT INTO chat_messages (id, user_id, session_id, role, content, created_at) VALUES (1, 1, 1, 'user', 'keep this message', CURRENT_TIMESTAMP)"))
-        result = run_upgrade(self.legacy_url)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        with engine.connect() as connection:
-            self.assertEqual(connection.execute(text("SELECT content FROM chat_messages WHERE id = 1")).scalar_one(), "keep this message")
-            self.assertEqual(connection.execute(text("SELECT password_hash FROM user_accounts WHERE id = 1")).scalar_one(), "old-hash")
+        try:
+            with engine.begin() as connection:
+                connection.execute(text("INSERT INTO user_accounts (id, username, display_name, password_hash, roles_csv, created_at) VALUES (1, 'student', 'Student', 'old-hash', 'ROLE_USER', CURRENT_TIMESTAMP)"))
+                connection.execute(text("INSERT INTO chat_sessions (id, public_id, title, user_id, created_at, updated_at) VALUES (1, 'legacy-session', 'Legacy', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"))
+                connection.execute(text("INSERT INTO chat_messages (id, user_id, session_id, role, content, created_at) VALUES (1, 1, 1, 'user', 'keep this message', CURRENT_TIMESTAMP)"))
+            result = run_upgrade(self.legacy_url)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with engine.connect() as connection:
+                self.assertEqual(connection.execute(text("SELECT content FROM chat_messages WHERE id = 1")).scalar_one(), "keep this message")
+                self.assertEqual(connection.execute(text("SELECT password_hash FROM user_accounts WHERE id = 1")).scalar_one(), "old-hash")
+        finally:
+            engine.dispose()
 
     def test_matching_legacy_schema_is_stamped_then_upgraded_to_head(self):
         create_exact_legacy_schema(self.legacy_url)
         result = run_upgrade(self.legacy_url)
         self.assertEqual(result.returncode, 0, result.stderr)
-        with create_engine(self.legacy_url).connect() as connection:
-            self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one(), "0002_auth_audit_outbox_schema")
+        self.assertEqual(
+            scalar_sql(self.legacy_url, "SELECT version_num FROM alembic_version"),
+            "0006_privacy_controls",
+        )
 
     def test_unknown_or_incomplete_legacy_schema_is_rejected(self):
         engine = create_engine(self.unknown_url)
@@ -210,12 +246,13 @@ class MigrationWorkflowTests(unittest.TestCase):
         result = run_upgrade(self.unknown_url)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("alembic_version", inspect(engine).get_table_names())
+        engine.dispose()
 
     def test_same_names_and_columns_with_legacy_constraint_drift_is_rejected(self):
         create_legacy_schema(self.legacy_url)
         result = run_upgrade(self.legacy_url)
         self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn("alembic_version", inspect(create_engine(self.legacy_url)).get_table_names())
+        self.assertNotIn("alembic_version", table_names(self.legacy_url))
 
     def test_legacy_index_drift_is_rejected_without_version_table(self):
         create_exact_legacy_schema(self.legacy_url)
@@ -239,7 +276,7 @@ class MigrationWorkflowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(
             "alembic_version",
-            inspect(create_engine(self.legacy_url)).get_table_names(),
+            table_names(self.legacy_url),
         )
 
     def test_legacy_foreign_key_option_drift_is_rejected_without_version_table(self):
@@ -248,14 +285,16 @@ class MigrationWorkflowTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn(
             "alembic_version",
-            inspect(create_engine(self.legacy_url)).get_table_names(),
+            table_names(self.legacy_url),
         )
 
     def test_upgrade_is_idempotent(self):
         self.assertEqual(run_upgrade(self.empty_url).returncode, 0)
         self.assertEqual(run_upgrade(self.empty_url).returncode, 0)
-        with create_engine(self.empty_url).connect() as connection:
-            self.assertEqual(connection.execute(text("SELECT COUNT(*) FROM alembic_version")).scalar_one(), 1)
+        self.assertEqual(
+            scalar_sql(self.empty_url, "SELECT COUNT(*) FROM alembic_version"),
+            1,
+        )
 
     def test_baseline_revision_matches_frozen_historical_schema(self):
         command.upgrade(alembic_config(self.empty_url), BASELINE_REVISION)

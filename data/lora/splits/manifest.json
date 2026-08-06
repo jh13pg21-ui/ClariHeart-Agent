@@ -1,0 +1,44 @@
+{
+  "createdAt": "2026-08-05T09:32:36.415312+00:00",
+  "seed": 42,
+  "source": "data\\lora\\psychqa_synthetic.jsonl",
+  "sourceSha256": "c1d3676076cef20a1610b8d025fdc7df859c3f8dac6a5cd9c46d1227c5f15f02",
+  "sourceRows": 2400,
+  "deduplicatedRows": 2400,
+  "rejectedRows": 0,
+  "splits": {
+    "train": {
+      "path": "data\\lora\\splits\\train.jsonl",
+      "rows": 1920,
+      "sha256": "d77604f02a1d53786de0ded6fb8c053fcec852e85ee137a536785d5aaad758af",
+      "labels": {
+        "焦虑": 480,
+        "高风险": 480,
+        "正常": 480,
+        "低落": 480
+      }
+    },
+    "validation": {
+      "path": "data\\lora\\splits\\validation.jsonl",
+      "rows": 240,
+      "sha256": "07faf30a75ac7c80cafb565adeb4c97eebd562cde05a02b10b5a09ac744ffc73",
+      "labels": {
+        "焦虑": 60,
+        "低落": 60,
+        "高风险": 60,
+        "正常": 60
+      }
+    },
+    "test": {
+      "path": "data\\lora\\splits\\test.jsonl",
+      "rows": 240,
+      "sha256": "1b7b72645be8b4d2e2fa251f8aafc886a8a61d7604b09bc7d94821b0cf643b40",
+      "labels": {
+        "焦虑": 60,
+        "低落": 60,
+        "正常": 60,
+        "高风险": 60
+      }
+    }
+  }
+}

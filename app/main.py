@@ -33,7 +33,7 @@ def create_app(settings=None) -> FastAPI:
     @app.on_event("startup")
     def startup() -> None:
         runtime_settings.validate_auth_configuration()
-        ensure_database_current()
+        ensure_database_current(runtime_settings)
 
     app.include_router(auth_router)
     app.include_router(router)

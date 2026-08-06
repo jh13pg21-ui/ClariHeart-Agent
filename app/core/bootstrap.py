@@ -14,11 +14,11 @@ def create_schema() -> None:
     Base.metadata.create_all(bind=engine)
 
 
-def ensure_database_current() -> None:
+def ensure_database_current(settings=None) -> None:
     """在开始提供服务前确认 Alembic 已处于 head。"""
     from app.cli.migrate import check
 
-    check(get_settings().database_url)
+    check((settings or get_settings()).database_url)
 
 
 def seed_data(db: Session) -> None:

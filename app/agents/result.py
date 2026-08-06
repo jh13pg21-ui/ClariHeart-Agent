@@ -35,4 +35,4 @@ class AgentRunResult:
 
     @property
     def requires_report(self) -> bool:
-        return self.intent != IntentType.CHAT
+        return self.intent != IntentType.CHAT or self.risk_level != RiskLevel.LOW

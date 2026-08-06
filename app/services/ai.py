@@ -9,6 +9,7 @@ import httpx
 from app.core.config import Settings
 from app.core.enums import IntentType, RiskLevel
 from app.schemas.dtos import AiMessage
+from app.services.risk_rules import detect_risk_signal
 
 
 class PromptTemplates:
@@ -17,8 +18,9 @@ class PromptTemplates:
         return [
             AiMessage(role="system", content=(
                 "你是一个用户意图分类器，只做意图识别，不回答问题。"
-                "只输出 CHAT、CONSULT、RISK 之一。CHAT 包含普通闲聊、学习、编程、作业、校园事务；"
-                "CONSULT 包含压力、焦虑、低落、失眠、情绪倾诉；RISK 包含自杀、自残、伤人或即时危险信号。"
+                "只输出 CHAT、CONSULT 之一。CHAT 包含普通闲聊、学习、编程、作业、校园事务；"
+                "CONSULT 包含压力、焦虑、低落、失眠、情绪倾诉以及自杀、自残、伤人或即时危险表达。"
+                "风险程度由独立 SafetyAgent 评估，不要输出 RISK。"
                 "必须结合最近上下文理解“是、继续、安慰一下、然后呢”等省略或承接表达，"
                 "不能因为当前输入很短就忽略上一轮正在讨论的主题。"
             )),
@@ -203,13 +205,11 @@ def format_history(history: list[AiMessage]) -> str:
     return "\n".join(f"{m.role}: {m.content}" for m in history[-20:])
 
 
-HIGH_RISK_WORDS = ["自杀", "自残", "不想活", "结束生命", "伤害自己", "轻生", "suicide", "kill myself", "self harm"]
 CONSULT_WORDS = ["焦虑", "抑郁", "压力", "失眠", "难过", "崩溃", "痛苦", "无助", "心理", "咨询", "anxious", "depress", "stress"]
 
 
 def has_high_risk_signal(text: str) -> bool:
-    normalized = text.lower()
-    return any(word in normalized for word in HIGH_RISK_WORDS)
+    return detect_risk_signal(text).level == RiskLevel.HIGH
 
 
 def has_consult_signal(text: str) -> bool:

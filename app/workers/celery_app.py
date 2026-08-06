@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from kombu import Exchange, Queue
 
 from app.core.config import get_settings
@@ -45,9 +46,23 @@ celery_app.conf.update(
             "queue": settings.celery_general_queue,
             "routing_key": settings.celery_general_queue,
         },
+        "app.workers.tasks.extract_long_term_memory": {
+            "queue": settings.celery_general_queue,
+            "routing_key": settings.celery_general_queue,
+        },
+        "app.workers.tasks.purge_expired_private_data": {
+            "queue": settings.celery_general_queue,
+            "routing_key": settings.celery_general_queue,
+        },
         "app.workers.tasks.send_high_risk_alert": {
             "queue": settings.celery_alert_queue,
             "routing_key": settings.celery_alert_queue,
+        },
+    },
+    beat_schedule={
+        "purge-expired-private-data-daily": {
+            "task": "app.workers.tasks.purge_expired_private_data",
+            "schedule": crontab(hour=3, minute=20),
         },
     },
 )

@@ -21,6 +21,10 @@ class CeleryBroker:
         "report.excel": ("app.workers.tasks.process_excel", "general"),
         "case.create": ("app.workers.tasks.create_case", "general"),
         "case.created": ("app.workers.tasks.send_high_risk_alert", "alert"),
+        "memory.extract": (
+            "app.workers.tasks.extract_long_term_memory",
+            "general",
+        ),
     }
 
     def __init__(self, settings: Settings):
@@ -78,9 +82,21 @@ class OutboxPublisher:
                 except Exception as exc:
                     event.attempts += 1
                     event.last_error = f"{type(exc).__name__}: {exc}"
-                    event.available_at = datetime.utcnow() + timedelta(
-                        seconds=min(300, 2 ** event.attempts)
-                    )
+                    if event.attempts >= max(
+                        1,
+                        int(
+                            getattr(
+                                getattr(self.broker, "settings", None),
+                                "outbox_publisher_max_attempts",
+                                10,
+                            )
+                        ),
+                    ):
+                        event.status = "DEAD"
+                    else:
+                        event.available_at = datetime.utcnow() + timedelta(
+                            seconds=min(300, 2 ** event.attempts)
+                        )
                     db.add(event)
                     continue
                 event.status = "PUBLISHED"

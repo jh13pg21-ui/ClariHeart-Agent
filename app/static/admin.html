@@ -53,66 +53,89 @@
 
     <section class="admin-columns">
       <div class="admin-stack">
-        <section class="panel">
-          <div class="section-head">
+        <details class="panel admin-module" data-module="cases">
+          <summary class="section-head">
             <div>
               <p class="panel-label">CASES</p>
               <h2>风险个案闭环</h2>
             </div>
+            <div class="module-summary">
+              <span id="casesCount" class="module-count">0 条</span>
+              <span class="module-chevron" aria-hidden="true"></span>
+            </div>
+          </summary>
+          <div class="module-body">
+            <div id="cases" class="cases"></div>
           </div>
-          <div id="cases" class="cases"></div>
-        </section>
+        </details>
 
-        <section class="panel">
-          <div class="section-head">
+        <details class="panel admin-module" data-module="knowledge">
+          <summary class="section-head">
             <div>
               <p class="panel-label">KNOWLEDGE BASE</p>
               <h2>RAG 知识库维护</h2>
             </div>
-            <span id="knowledgeState" class="hint">等待读取</span>
+            <div class="module-summary">
+              <span id="knowledgeState" class="hint">等待读取</span>
+              <span class="module-chevron" aria-hidden="true"></span>
+            </div>
+          </summary>
+          <div class="module-body">
+            <form id="knowledgeUploadForm" class="upload-row">
+              <input id="knowledgeFile" type="file" accept=".pdf,.md,.markdown,.txt,application/pdf,text/markdown,text/plain">
+              <button class="primary" type="submit">上传入库</button>
+            </form>
+            <div class="admin-actions">
+              <button id="rebuildVector" class="ghost" type="button">重建向量索引</button>
+              <button id="backupVector" class="ghost" type="button">备份向量索引</button>
+            </div>
+            <p id="knowledgeUploadState" class="hint">支持 PDF、Markdown、txt 文件</p>
           </div>
-          <form id="knowledgeUploadForm" class="upload-row">
-            <input id="knowledgeFile" type="file" accept=".pdf,.md,.markdown,.txt,application/pdf,text/markdown,text/plain">
-            <button class="primary" type="submit">上传入库</button>
-          </form>
-          <div class="admin-actions">
-            <button id="rebuildVector" class="ghost" type="button">重建向量索引</button>
-            <button id="backupVector" class="ghost" type="button">备份向量索引</button>
-          </div>
-          <p id="knowledgeUploadState" class="hint">支持 PDF、Markdown、txt 文件</p>
-        </section>
+        </details>
       </div>
 
       <div class="admin-stack">
-        <section class="panel">
-          <div class="section-head">
+        <details class="panel admin-module" data-module="reports">
+          <summary class="section-head">
             <div>
               <p class="panel-label">REPORTS</p>
               <h2>心理风险与咨询报告</h2>
             </div>
+            <div class="module-summary">
+              <span id="reportsCount" class="module-count">0 条</span>
+              <span class="module-chevron" aria-hidden="true"></span>
+            </div>
+          </summary>
+          <div class="module-body">
+            <div id="reports" class="reports"></div>
           </div>
-          <div id="reports" class="reports"></div>
-        </section>
+        </details>
 
-        <section class="panel">
-          <div class="section-head">
+        <details class="panel admin-module" data-module="archive">
+          <summary class="section-head">
             <div>
               <p class="panel-label">SESSION ARCHIVE</p>
               <h2>会话档案审阅</h2>
             </div>
-            <span id="conversationState" class="hint">选择一条报告查看</span>
-          </div>
-          <div id="conversationDetail" class="conversation-detail">
-            <div class="empty small">
-              <strong>未选择报告</strong>
-              <p>点击上方任意报告后，这里只读展示历史消息。</p>
+            <div class="module-summary">
+              <span id="conversationState" class="hint">选择一条报告查看</span>
+              <span class="module-chevron" aria-hidden="true"></span>
+            </div>
+          </summary>
+          <div class="module-body">
+            <div id="conversationDetail" class="conversation-detail">
+              <div class="empty small">
+                <strong>未选择报告</strong>
+                <p>点击上方任意报告后，这里只读展示历史消息。</p>
+              </div>
             </div>
           </div>
-        </section>
+        </details>
       </div>
     </section>
   </main>
 
-  <script src="/admin.js?v=role-split-20260617"></script>
+  <script src="/admin-panels.js?v=collapsible-panels-20260729"></script>
+  <script src="/admin.js?v=collapsible-panels-20260729"></script>
 </body>
 </html>

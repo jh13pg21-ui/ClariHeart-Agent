@@ -9,13 +9,18 @@ from app.services.output_safety import OutputSafetyStatus
 
 
 class FakeClient:
-    def __init__(self, text):
+    def __init__(self, text, stream_chunks=None):
         self.text = text
         self.calls = 0
+        self.stream_chunks = stream_chunks or [text]
 
     async def complete(self, messages):
         self.calls += 1
         return self.text
+
+    async def stream(self, messages):
+        for chunk in self.stream_chunks:
+            yield chunk
 
 
 class FakePrivateMemory:
@@ -29,7 +34,7 @@ class FakePrivateMemory:
         return None
 
 
-def services(client):
+def services(client, response_token_sink=None):
     profile = SimpleNamespace(provider="mock", model="candidate-model")
     return SimpleNamespace(
         settings=SimpleNamespace(),
@@ -40,6 +45,7 @@ def services(client):
             client_for=lambda name: client,
             profile_for=lambda name: profile,
         ),
+        response_token_sink=response_token_sink,
     )
 
 
@@ -80,6 +86,37 @@ class ResponseCandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(candidate.payload["latencyMs"], 0)
         self.assertNotIn("messages", candidate.payload)
         self.assertRegex(candidate.metadata["promptSummaryHash"], r"^[0-9a-f]{64}$")
+
+    async def test_low_risk_response_uses_provider_stream_and_forwards_original_chunks(self):
+        chunks = ["第一段", "，第二段", "。"]
+        forwarded = []
+
+        async def sink(chunk):
+            forwarded.append(chunk)
+
+        client = FakeClient("不应调用 complete", chunks)
+        agent = ResponseAgent(services(client, response_token_sink=sink))
+
+        result = await agent.act(AgentTask(id="response", title="response"), base_board())
+
+        self.assertEqual(forwarded, ["".join(chunks)])
+        self.assertEqual(result.artifacts[0].payload["text"], "第一段，第二段。")
+        self.assertEqual(client.calls, 0)
+
+    async def test_low_risk_stream_stops_before_exposing_output_safety_blocker(self):
+        forwarded = []
+
+        async def sink(chunk):
+            forwarded.append(chunk)
+
+        chunks = ["可以先这样做。", "后台风险评分：HIGH。", "不应继续推送。"]
+        client = FakeClient("不应调用 complete", chunks)
+        agent = ResponseAgent(services(client, response_token_sink=sink))
+
+        result = await agent.act(AgentTask(id="response", title="response"), base_board())
+
+        self.assertEqual(forwarded, ["可以先这样做。"])
+        self.assertEqual(result.artifacts[0].payload["text"], "".join(chunks))
 
     async def test_safety_agent_reviews_actual_candidate_text(self):
         client = FakeClient("unused")

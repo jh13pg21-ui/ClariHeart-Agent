@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -11,9 +12,10 @@ from app.workers.outbox_publisher import OutboxPublisher
 
 
 class FakeBroker:
-    def __init__(self, error=None):
+    def __init__(self, error=None, max_attempts=10):
         self.error = error
         self.events = []
+        self.settings = SimpleNamespace(outbox_publisher_max_attempts=max_attempts)
 
     def publish(self, event):
         if self.error:
@@ -72,6 +74,22 @@ class OutboxPublisherTests(unittest.TestCase):
         self.assertEqual(event.attempts, 1)
         self.assertGreater(event.available_at, before)
         self.assertIn("down", event.last_error)
+        db.close()
+
+    def test_broker_error_moves_poison_event_to_dead_state(self):
+        event_id = self._event()
+
+        published = OutboxPublisher(
+            self.Session,
+            FakeBroker(RuntimeError("broker unavailable"), max_attempts=1),
+        ).publish_batch(10)
+
+        db = self.Session()
+        event = db.query(OutboxEvent).filter_by(event_id=event_id).one()
+        self.assertEqual(published, 0)
+        self.assertEqual(event.status, "DEAD")
+        self.assertEqual(event.attempts, 1)
+        self.assertIn("broker unavailable", event.last_error)
         db.close()
 
 

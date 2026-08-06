@@ -25,6 +25,7 @@ class UserAccount(Base):
     password_algorithm: Mapped[str] = mapped_column(String(32), default="legacy_sha256", server_default="legacy_sha256")
     must_reset_password: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     disabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    long_term_memory_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
 
     sessions: Mapped[list["ChatSession"]] = relationship(back_populates="user")
 
@@ -46,6 +47,7 @@ class ChatSession(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("user_accounts.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    long_term_memory_extracted_message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     user: Mapped[UserAccount] = relationship(back_populates="sessions")
     messages: Mapped[list["ChatMessage"]] = relationship(back_populates="session", cascade="all, delete-orphan")
@@ -65,6 +67,40 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     session: Mapped[ChatSession] = relationship(back_populates="messages")
+
+
+class LongTermMemory(Base):
+    __tablename__ = "long_term_memories"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "content_hash",
+            name="uq_long_term_memories_user_content_hash",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        index=True,
+    )
+    source_session_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("chat_sessions.id"),
+        nullable=True,
+        index=True,
+    )
+    memory_type: Mapped[str] = mapped_column(String(32), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str] = mapped_column(String(256))
+    body: Mapped[str] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    last_accessed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
 
 
 class KnowledgeChunk(Base):
@@ -237,8 +273,6 @@ class OutboxEvent(Base):
     __tablename__ = "outbox_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    event_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    idempotency_key: Mapped[str] = mapped_column(String(256), unique=True, index=True)
     event_type: Mapped[str] = mapped_column(String(128), index=True)
     aggregate_type: Mapped[str] = mapped_column(String(64))
     aggregate_id: Mapped[str] = mapped_column(String(128), index=True)
@@ -246,10 +280,12 @@ class OutboxEvent(Base):
     status: Mapped[str] = mapped_column(String(32), default="PENDING", index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     available_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
-    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    event_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(256), unique=True, index=True)
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class ProcessedMessage(Base):

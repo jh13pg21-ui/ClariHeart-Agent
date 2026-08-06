@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections import defaultdict
+from dataclasses import dataclass, replace
 
 from app.agents.autonomous import CoordinatorAgent
 from app.agents.events import (
@@ -11,10 +13,28 @@ from app.agents.events import (
     CollaborationBlackboard,
     PRIORITY_ORDER,
     TaskPriority,
+    TaskStatus,
+)
+from app.agents.recovery import (
+    AgentFailureKind,
+    classify_agent_error,
+    compact_board_for_retry,
+    retry_delay,
 )
 from app.agents.registry import AgentCapability, AgentRegistry
 from app.core.config import Settings
-from app.core.enums import IntentType, RiskLevel
+from app.core.enums import EmotionLabel, IntentType, RiskLevel
+from app.services.ai import has_consult_signal
+from app.services.assessment import PsychologyAssessment
+from app.services.output_safety import OutputSafetyStatus, safe_fallback
+from app.services.risk_rules import detect_risk_signal
+from app.services.skills import MindBridgeSkillLibrary
+
+
+@dataclass(frozen=True)
+class AgentInvocationOutcome:
+    task: AgentTask
+    result: object
 
 
 class EventDrivenCoordinator:
@@ -32,6 +52,11 @@ class EventDrivenCoordinator:
         self.max_claims_per_round = int(getattr(settings, "agent_max_claims_per_round", 4))
         self.max_claims_per_agent = int(getattr(settings, "agent_max_claims_per_agent", 3))
         self.final_min_confidence = float(getattr(settings, "agent_final_acceptance_min_confidence", 0.6))
+        self.task_timeout_seconds = float(getattr(settings, "agent_task_timeout_seconds", 70.0))
+        self.task_max_attempts = max(1, int(getattr(settings, "agent_task_max_attempts", 2)))
+        self.retry_base_seconds = float(getattr(settings, "agent_retry_base_seconds", 0.2))
+        self.retry_max_seconds = float(getattr(settings, "agent_retry_max_seconds", 2.0))
+        self.retry_jitter_ratio = float(getattr(settings, "agent_retry_jitter_ratio", 0.25))
 
     async def run(self, board: CollaborationBlackboard) -> CollaborationBlackboard:
         board = self._ensure_root_task(board)
@@ -78,7 +103,7 @@ class EventDrivenCoordinator:
                         self._run_candidate(index, task, candidate, round_board, results)
                     )
             completed = [
-                (task, candidate, results[index])
+                (results[index].task, candidate, results[index].result)
                 for index, (task, candidate) in enumerate(invocations)
             ]
             completed.sort(key=self._merge_key)
@@ -97,7 +122,57 @@ class EventDrivenCoordinator:
         )
 
     async def _run_candidate(self, index, task, candidate, round_board, results) -> None:
-        results[index] = await candidate.agent.act(task, round_board)
+        retry_events = []
+        attempt_board = round_board
+        max_attempts = max(1, min(task.max_attempts, self.task_max_attempts))
+        effective_task = task
+        for attempt in range(1, max_attempts + 1):
+            effective_task = replace(task, attempts=task.attempts + attempt - 1)
+            try:
+                async with asyncio.timeout(self.task_timeout_seconds):
+                    result = await candidate.agent.act(effective_task, attempt_board)
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
+                    raise
+                failure = classify_agent_error(exc)
+                error = f"{failure.error_type}: {failure.message}"[:1000]
+                if failure.retryable and attempt < max_attempts:
+                    retry_events.append(
+                        AgentEvent(
+                            type=AgentEventType.TASK_RETRY_SCHEDULED,
+                            actor=candidate.agent.profile.name,
+                            task_id=task.id,
+                            message=error,
+                            metadata={
+                                "attempt": attempt,
+                                "maxAttempts": max_attempts,
+                                "failureKind": failure.kind.value,
+                            },
+                        )
+                    )
+                    if failure.kind == AgentFailureKind.CONTEXT_OVERFLOW:
+                        attempt_board = compact_board_for_retry(round_board)
+                    delay = retry_delay(
+                        attempt,
+                        self.retry_base_seconds,
+                        self.retry_max_seconds,
+                        self.retry_jitter_ratio,
+                    )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+                result = self._fallback_result(effective_task, candidate.agent.profile.name, round_board, failure)
+                result = replace(
+                    result,
+                    events=(*retry_events, *result.events),
+                    task_status=TaskStatus.FAILED,
+                    task_error=error,
+                )
+                results[index] = AgentInvocationOutcome(effective_task, result)
+                return
+            result = replace(result, events=(*retry_events, *result.events))
+            results[index] = AgentInvocationOutcome(effective_task, result)
+            return
 
     @staticmethod
     def _merge_key(item) -> tuple[int, str, str]:
@@ -157,7 +232,7 @@ class EventDrivenCoordinator:
         )
         intent = _intent_value(board)
         risk = _risk_value(board)
-        needs_context = intent in {IntentType.CONSULT, IntentType.RISK} or risk in {RiskLevel.MEDIUM, RiskLevel.HIGH}
+        needs_context = intent == IntentType.CONSULT or risk in {RiskLevel.MEDIUM, RiskLevel.HIGH}
         board = self._ensure_task_for_missing_artifact(
             board,
             artifact_kind="context",
@@ -176,7 +251,7 @@ class EventDrivenCoordinator:
         can_request_response = force_response or (
             board.latest_artifact("intent") is not None
             and board.latest_artifact("risk") is not None
-            and (not needs_context or board.latest_artifact("context") is not None or risk == RiskLevel.HIGH)
+            and (not needs_context or board.latest_artifact("context") is not None)
         )
         board = self._ensure_task_for_missing_artifact(
             board,
@@ -203,6 +278,153 @@ class EventDrivenCoordinator:
                 ),
             )
         return board
+
+    def _fallback_result(self, task, agent_name, board, failure):
+        from app.agents.events import AgentArtifact, AgentTurnResult
+
+        kind = str(task.metadata.get("kind", ""))
+        risk = _risk_value(board)
+        intent = _intent_value(board)
+        artifact_kind = "agent_failure"
+        payload = {
+            "failureKind": failure.kind.value,
+            "errorType": failure.error_type,
+            "message": failure.message[:500],
+            "fallback": True,
+        }
+        confidence = 1.0
+        metadata = {"recoveredFromAgentFailure": True}
+
+        if kind == "memory":
+            artifact_kind = "memory"
+            payload |= {
+                "history": [],
+                "memoryBrief": "记忆服务暂时不可用，本轮不注入历史。",
+                "longTermMemoryIndex": [],
+                "longTermMemories": [],
+                "longTermMemoryContext": "无相关长期记忆。",
+            }
+        elif kind == "intent":
+            artifact_kind = "intent"
+            rule_risk = detect_risk_signal(board.user_input).level
+            fallback_intent = IntentType.CONSULT if (
+                rule_risk in {RiskLevel.MEDIUM, RiskLevel.HIGH}
+                or has_consult_signal(board.user_input)
+            ) else IntentType.CHAT
+            payload |= {
+                "intent": fallback_intent.value,
+                "topic": "safety" if _hard_high_risk(board.user_input) else "fallback",
+                "reason": "deterministic fallback after UnderstandingAgent failure",
+            }
+        elif kind == "risk":
+            artifact_kind = "risk"
+            rule_risk = detect_risk_signal(board.user_input).level
+            if rule_risk == RiskLevel.HIGH:
+                fallback_risk = RiskLevel.HIGH
+                emotion = EmotionLabel.HIGH_RISK
+                score = 4.0
+            elif rule_risk == RiskLevel.MEDIUM or has_consult_signal(board.user_input):
+                fallback_risk = RiskLevel.MEDIUM
+                emotion = EmotionLabel.ANXIETY
+                score = 3.0
+            else:
+                fallback_risk = RiskLevel.LOW
+                emotion = EmotionLabel.NORMAL
+                score = 0.0
+            assessment = PsychologyAssessment(
+                emotion,
+                score,
+                fallback_risk,
+                0.5,
+                "风险评估服务异常，已采用保守规则兜底",
+            )
+            payload |= {
+                "risk": fallback_risk.value,
+                "emotion": emotion.value,
+                "emotionScore": score,
+                "confidence": 0.5,
+                "summary": assessment.summary,
+                "assessment": assessment,
+            }
+            if fallback_risk == RiskLevel.HIGH:
+                metadata["safetyOverride"] = True
+        elif kind == "context":
+            artifact_kind = "context"
+            memory = board.latest_artifact("memory")
+            memory_payload = memory.payload if memory else {}
+            try:
+                skill_context = MindBridgeSkillLibrary.response_skill_context(
+                    intent,
+                    risk,
+                    board.user_input,
+                )
+                selected_skills = MindBridgeSkillLibrary.response_skill_names(intent, risk, board.user_input)
+            except Exception:
+                skill_context = ""
+                selected_skills = []
+            payload |= {
+                "memoryBrief": memory_payload.get("memoryBrief", "无相关历史记忆。"),
+                "modelHistory": memory_payload.get("history", []),
+                "longTermMemoryContext": "无相关长期记忆。",
+                "retrievedKnowledge": [],
+                "skillContext": skill_context,
+                "selectedSkills": selected_skills,
+                "skillSelectionStrategy": "deterministic_failure_fallback",
+            }
+        elif kind in {"response", "response_candidate"}:
+            artifact_kind = "response_candidate"
+            payload |= {
+                "text": safe_fallback(risk),
+                "model": "deterministic-fallback",
+                "provider": "local",
+                "latencyMs": 0.0,
+                "mode": "failure_fallback",
+                "intent": intent.value,
+                "risk": risk.value,
+                "revisionCount": int(task.metadata.get("revisionCount", 0)),
+                "generationStatus": "fallback",
+                "responseAgent": agent_name,
+            }
+        elif kind == "safety_review":
+            response = board.latest_artifact("response_candidate")
+            artifact_kind = "output_safety"
+            payload |= {
+                "status": OutputSafetyStatus.FALLBACK.value,
+                "text": safe_fallback(risk),
+                "reason": "SafetyAgent unavailable; fail closed",
+                "responseArtifactId": response.id if response else "",
+                "risk": risk.value,
+            }
+            metadata["responseArtifactId"] = response.id if response else ""
+
+        artifact = AgentArtifact(
+            id=f"{agent_name}:{artifact_kind}:fallback:{uuid.uuid4().hex[:10]}",
+            owner=agent_name,
+            kind=artifact_kind,
+            payload=payload,
+            confidence=confidence,
+            task_id=task.id,
+            metadata=metadata,
+        )
+        return AgentTurnResult(
+            artifacts=(artifact,),
+            events=(
+                AgentEvent(
+                    type=AgentEventType.TASK_FAILED,
+                    actor=agent_name,
+                    task_id=task.id,
+                    message=f"{failure.error_type}: {failure.message}"[:1000],
+                    metadata={"failureKind": failure.kind.value},
+                ),
+                AgentEvent(
+                    type=AgentEventType.TASK_FALLBACK_PUBLISHED,
+                    actor=agent_name,
+                    task_id=task.id,
+                    artifact_id=artifact.id,
+                    message=artifact_kind,
+                ),
+            ),
+        )
 
     def _ensure_task_for_missing_artifact(
         self,
@@ -291,7 +513,7 @@ def _intent_value(board: CollaborationBlackboard) -> IntentType:
         except ValueError:
             return IntentType.CHAT
     if _hard_high_risk(board.user_input):
-        return IntentType.RISK
+        return IntentType.CONSULT
     return IntentType.CHAT
 
 
@@ -311,5 +533,4 @@ def _risk_value(board: CollaborationBlackboard) -> RiskLevel:
 
 
 def _hard_high_risk(text: str) -> bool:
-    lowered = (text or "").lower()
-    return any(word in lowered for word in ["自杀", "自残", "不想活", "结束生命", "伤害自己", "轻生", "suicide", "kill myself", "self harm"])
+    return detect_risk_signal(text).level == RiskLevel.HIGH

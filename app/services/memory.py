@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from importlib import import_module
 from typing import Protocol
@@ -13,6 +14,7 @@ from app.core.config import Settings
 from app.models.entities import ChatMessage, ChatSession
 from app.schemas.dtos import AiMessage
 from app.services.privacy import PrivacySanitizer
+from app.services.data_protection import SensitiveTextProtector
 
 
 logger = logging.getLogger(__name__)
@@ -22,12 +24,79 @@ class MemoryCompactionSettings(Protocol):
     memory_compaction_enabled: bool
     memory_compaction_recent_messages: int
     memory_summary_max_chars: int
+    memory_summary_refresh_messages: int
+
+
+@dataclass(frozen=True)
+class ConversationSummaryState:
+    """增量维护的会话摘要及其未压缩原文尾部。"""
+
+    summary: str
+    tail: tuple[AiMessage, ...]
+
+    @classmethod
+    def from_history(
+        cls,
+        history: list[AiMessage],
+        settings: MemoryCompactionSettings,
+    ) -> "ConversationSummaryState":
+        return cls("", ()).advance(history, settings)
+
+    def advance(
+        self,
+        messages: list[AiMessage],
+        settings: MemoryCompactionSettings,
+    ) -> "ConversationSummaryState":
+        recent_count = max(2, int(getattr(settings, "memory_compaction_recent_messages", 8)))
+        refresh_count = max(1, int(getattr(settings, "memory_summary_refresh_messages", 4)))
+        max_chars = max(120, int(getattr(settings, "memory_summary_max_chars", 500)))
+        privacy = PrivacySanitizer()
+        tail = [
+            AiMessage(role=message.role, content=privacy.sanitize(message.content))
+            for message in [*self.tail, *messages]
+        ]
+        summary = self.summary
+        while len(tail) >= recent_count + refresh_count:
+            summary = _merge_summary(summary, tail[:refresh_count], max_chars)
+            tail = tail[refresh_count:]
+        return ConversationSummaryState(summary, tuple(tail))
+
+    def to_json(self) -> str:
+        return json.dumps({"summary": self.summary, "tail": [{"role": item.role, "content": item.content} for item in self.tail]}, ensure_ascii=False)
+
+    @classmethod
+    def from_json(cls, raw: str | None) -> "ConversationSummaryState | None":
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+            return cls(str(payload.get("summary", "")), tuple(AiMessage(role=str(item["role"]), content=str(item["content"])) for item in payload.get("tail", [])))
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+
+def _merge_summary(existing: str, messages: list[AiMessage], max_chars: int) -> str:
+    addition = summarize_history_for_memory(messages, max_chars=max_chars)
+    if not existing:
+        return addition
+    return _clip(f"{existing}\n{addition}", max_chars)
+
+
+def _new_messages_after_tail(history: list[AiMessage], tail: tuple[AiMessage, ...]) -> list[AiMessage] | None:
+    if not tail:
+        return history
+    expected = list(tail)
+    for start in range(len(history) - len(expected), -1, -1):
+        if history[start:start + len(expected)] == expected:
+            return history[start + len(expected):]
+    return None
 
 
 class RedisShortTermMemoryStore:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.privacy = PrivacySanitizer()
+        self.protector = SensitiveTextProtector(settings)
         self.client = self._connect()
 
     def load_recent(self, session_public_id: str) -> list[AiMessage]:
@@ -58,6 +127,16 @@ class RedisShortTermMemoryStore:
         if history:
             self.replace(session.public_id, history)
         return history
+
+    def prompt_history(self, session_public_id: str, history: list[AiMessage]) -> tuple[list[AiMessage], str]:
+        state = self._load_summary_state(session_public_id)
+        additions = _new_messages_after_tail(history, state.tail) if state else None
+        state = state.advance(additions, self.settings) if additions is not None else ConversationSummaryState.from_history(history, self.settings)
+        self._save_summary_state(session_public_id, state)
+        prompt = list(state.tail)
+        if state.summary:
+            prompt.insert(0, AiMessage(role="system", content=f"历史摘要：\n{state.summary}"))
+        return prompt, state.summary
 
     def messages_from_rows(self, rows: list[ChatMessage]) -> list[AiMessage]:
         return [self._message_from_row(row) for row in rows]
@@ -122,7 +201,12 @@ class RedisShortTermMemoryStore:
         return client
 
     def _message_from_row(self, row: ChatMessage) -> AiMessage:
-        return AiMessage(role=row.role.lower(), content=self.privacy.sanitize(row.content))
+        protector = getattr(self, "protector", None)
+        content = protector.reveal(row.content) if protector is not None else row.content
+        return AiMessage(
+            role=row.role.lower(),
+            content=self.privacy.sanitize(content),
+        )
 
     def _serialize(self, role: str, content: str) -> str:
         return json.dumps(
@@ -136,6 +220,26 @@ class RedisShortTermMemoryStore:
 
     def _key(self, session_public_id: str) -> str:
         return f"mindbridge:short-term-memory:{session_public_id}"
+
+    def _summary_key(self, session_public_id: str) -> str:
+        return f"mindbridge:conversation-summary:{session_public_id}"
+
+    def _load_summary_state(self, session_public_id: str) -> ConversationSummaryState | None:
+        if self.client is None:
+            return None
+        try:
+            return ConversationSummaryState.from_json(self.client.get(self._summary_key(session_public_id)))
+        except Exception as exc:
+            logger.warning("Redis summary read unavailable: %s", exc)
+            return None
+
+    def _save_summary_state(self, session_public_id: str, state: ConversationSummaryState) -> None:
+        if self.client is None:
+            return
+        try:
+            self.client.set(self._summary_key(session_public_id), state.to_json(), ex=self.settings.redis_memory_ttl_seconds)
+        except Exception as exc:
+            logger.warning("Redis summary write unavailable: %s", exc)
 
 
 def compact_history_for_prompt(

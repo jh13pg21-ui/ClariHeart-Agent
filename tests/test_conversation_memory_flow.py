@@ -62,6 +62,9 @@ def memory_board(current_input: str = "是") -> CollaborationBlackboard:
                         ),
                     ],
                     "memoryBrief": "学生刚才询问詹姆斯哈登并希望继续了解。",
+                    "longTermMemoryContext": (
+                        "- [PREFERENCE] 回复风格：学生希望先给结论，再给简短说明。"
+                    ),
                 },
             )
         )
@@ -153,6 +156,7 @@ class ConversationMemoryRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         prompt = "\n".join(message.content for message in client.calls[0])
         self.assertIn("詹姆斯哈登", prompt)
+        self.assertIn("学生希望先给结论", prompt)
         self.assertEqual(client.calls[0][-1].content, "是")
 
     async def test_coordinator_waits_for_memory_before_intent_and_safety_tasks(self):

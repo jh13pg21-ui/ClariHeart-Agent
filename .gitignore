@@ -12,6 +12,7 @@ target/
 dist/
 *.gguf
 *.gguf.zip
+models/mindbridge-qwen2.5-7b-lora/
 *.zip
 /python
 .worktrees/

@@ -3,6 +3,8 @@ import time
 import unittest
 from types import SimpleNamespace
 
+import httpx
+
 from app.agents.coordinator import EventDrivenCoordinator
 from app.agents.events import (
     AgentArtifact,
@@ -42,6 +44,20 @@ class SleepingAgent:
             ),
             events=events,
         )
+
+
+class FailingAgent(SleepingAgent):
+    def __init__(self, name: str, artifact_kind: str, failures: int, exc: Exception):
+        super().__init__(name, artifact_kind)
+        self.failures = failures
+        self.exc = exc
+        self.calls = 0
+
+    async def act(self, task, board):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.exc
+        return await super().act(task, board)
 
 
 class AsyncAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -103,6 +119,65 @@ class AsyncAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         from app.agents.coordinator import _risk_value
 
         self.assertEqual(_risk_value(board).value, "HIGH")
+
+    async def test_one_agent_failure_publishes_fallback_without_cancelling_peers(self):
+        failed = FailingAgent("Broken", "broken", 1, ValueError("永久失败"))
+        healthy = SleepingAgent("Healthy", "healthy")
+        board = CollaborationBlackboard(
+            turn_id="turn",
+            tasks={
+                "task:Broken": AgentTask(id="task:Broken", title="Broken", metadata={"kind": "demo"}),
+                "task:Healthy": AgentTask(id="task:Healthy", title="Healthy", metadata={"kind": "demo"}),
+            },
+        )
+        settings = SimpleNamespace(
+            agent_max_rounds=1,
+            agent_max_claims_per_round=2,
+            agent_max_claims_per_agent=1,
+            agent_final_acceptance_min_confidence=0.6,
+            agent_task_max_attempts=2,
+            agent_task_timeout_seconds=1,
+            agent_retry_base_seconds=0,
+        )
+        coordinator_agent = SimpleNamespace(
+            name="CoordinatorAgent",
+            root_task=lambda current: AgentTask(id="task:root", title="root"),
+            remember_acceptance=lambda artifact_id, reason: None,
+        )
+
+        result = await EventDrivenCoordinator(AgentRegistry([failed, healthy]), coordinator_agent, settings).run(board)
+
+        self.assertIsNotNone(result.latest_artifact("healthy"))
+        self.assertIsNotNone(result.latest_artifact("agent_failure"))
+        self.assertEqual(result.tasks["task:Broken"].status.value, "FAILED")
+        self.assertTrue(any(event.type == AgentEventType.TASK_FAILED for event in result.events))
+
+    async def test_transient_local_model_failure_retries_then_succeeds(self):
+        flaky = FailingAgent("Flaky", "intent", 1, httpx.ConnectError("ollama connection refused"))
+        board = CollaborationBlackboard(
+            turn_id="turn",
+            tasks={"task:Flaky": AgentTask(id="task:Flaky", title="Flaky", max_attempts=2)},
+        )
+        settings = SimpleNamespace(
+            agent_max_rounds=1,
+            agent_max_claims_per_round=1,
+            agent_max_claims_per_agent=1,
+            agent_final_acceptance_min_confidence=0.6,
+            agent_task_max_attempts=2,
+            agent_task_timeout_seconds=1,
+            agent_retry_base_seconds=0,
+        )
+        coordinator_agent = SimpleNamespace(
+            name="CoordinatorAgent",
+            root_task=lambda current: AgentTask(id="task:root", title="root"),
+            remember_acceptance=lambda artifact_id, reason: None,
+        )
+
+        result = await EventDrivenCoordinator(AgentRegistry([flaky]), coordinator_agent, settings).run(board)
+
+        self.assertEqual(flaky.calls, 2)
+        self.assertIsNotNone(result.latest_artifact("intent"))
+        self.assertTrue(any(event.type == AgentEventType.TASK_RETRY_SCHEDULED for event in result.events))
 
 
 if __name__ == "__main__":

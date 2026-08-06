@@ -1,9 +1,20 @@
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Annotated, Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainSerializer
+
+
+def _serialize_utc(value: datetime) -> str:
+    aware = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return aware.isoformat().replace("+00:00", "Z")
+
+
+UtcDateTime = Annotated[
+    datetime,
+    PlainSerializer(_serialize_utc, return_type=str, when_used="json"),
+]
 
 
 class ChatRequest(BaseModel):
@@ -15,6 +26,7 @@ class ChatStreamEvent(BaseModel):
     sessionId: Optional[str] = None
     content: Optional[str] = None
     message: Optional[str] = None
+    resetSession: Optional[bool] = None
     type: str
 
 
@@ -40,13 +52,13 @@ class ReportResponse(BaseModel):
     riskLevel: str
     confidence: float
     summary: str
-    createdAt: datetime
+    createdAt: UtcDateTime
 
 
 class ConversationMessageResponse(BaseModel):
     role: str
     content: str
-    createdAt: datetime
+    createdAt: UtcDateTime
 
 
 class ConversationResponse(BaseModel):
@@ -55,12 +67,40 @@ class ConversationResponse(BaseModel):
     messages: list[ConversationMessageResponse]
 
 
+class ConversationSummaryResponse(BaseModel):
+    sessionId: str
+    title: str
+    lastMessage: str
+    createdAt: UtcDateTime
+    updatedAt: UtcDateTime
+
+
+class LongTermMemoryResponse(BaseModel):
+    id: str
+    type: str
+    name: str
+    description: str
+    body: str
+    createdAt: UtcDateTime
+    updatedAt: UtcDateTime
+
+
+class PrivacyPreferenceRequest(BaseModel):
+    longTermMemoryEnabled: bool
+    purgeExistingMemories: bool = False
+
+
+class PrivacyPreferenceResponse(BaseModel):
+    longTermMemoryEnabled: bool
+    removedMemories: int = 0
+
+
 class ToolRecordResponse(BaseModel):
     id: int
     reportId: int
     status: str
     message: str
-    createdAt: datetime
+    createdAt: UtcDateTime
     channel: Optional[str] = None
     recipient: Optional[str] = None
     filePath: Optional[str] = None
@@ -75,9 +115,9 @@ class RiskCaseResponse(BaseModel):
     summary: str
     handoffSummary: str
     acknowledgedBy: Optional[str] = None
-    acknowledgedAt: Optional[datetime] = None
-    createdAt: datetime
-    updatedAt: datetime
+    acknowledgedAt: Optional[UtcDateTime] = None
+    createdAt: UtcDateTime
+    updatedAt: UtcDateTime
 
 
 class CaseNoteResponse(BaseModel):
@@ -85,7 +125,11 @@ class CaseNoteResponse(BaseModel):
     caseId: int
     actor: str
     note: str
-    createdAt: datetime
+    createdAt: UtcDateTime
+
+
+class CaseActionRequest(BaseModel):
+    note: str = Field(default="", max_length=2000)
 
 
 class ToolJobResponse(BaseModel):
@@ -96,10 +140,10 @@ class ToolJobResponse(BaseModel):
     attempts: int
     maxAttempts: int
     dependsOnJobId: Optional[int] = None
-    runAfter: datetime
+    runAfter: UtcDateTime
     lastError: str
-    createdAt: datetime
-    updatedAt: datetime
+    createdAt: UtcDateTime
+    updatedAt: UtcDateTime
 
 
 class DeadLetterResponse(BaseModel):
@@ -109,7 +153,19 @@ class DeadLetterResponse(BaseModel):
     kind: str
     reason: str
     payload: str
-    createdAt: datetime
+    createdAt: UtcDateTime
+
+
+class OutboxEventResponse(BaseModel):
+    eventId: str
+    eventType: str
+    aggregateType: str
+    aggregateId: str
+    status: str
+    attempts: int
+    lastError: str
+    availableAt: UtcDateTime
+    createdAt: UtcDateTime
 
 
 class AgentRunTraceResponse(BaseModel):
@@ -126,7 +182,7 @@ class AgentRunTraceResponse(BaseModel):
     retrievedKnowledge: list[dict[str, Any]]
     responseMessages: list[dict[str, Any]]
     assessment: dict[str, Any]
-    createdAt: datetime
+    createdAt: UtcDateTime
 
 
 class ToolAuditResponse(BaseModel):
@@ -139,8 +195,8 @@ class ToolAuditResponse(BaseModel):
     status: str
     reason: str
     payload: dict[str, Any]
-    createdAt: datetime
-    updatedAt: datetime
+    createdAt: UtcDateTime
+    updatedAt: UtcDateTime
 
 
 class AiMessage(BaseModel):

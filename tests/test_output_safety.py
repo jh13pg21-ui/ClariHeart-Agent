@@ -39,6 +39,18 @@ class OutputSafetyTests(unittest.TestCase):
         self.assertEqual(result.status, OutputSafetyStatus.APPROVED)
         self.assertEqual(result.text, text)
 
+    def test_diagnosis_and_dependency_language_requires_revision(self):
+        diagnosis = review_output("你肯定已经得了抑郁症。", RiskLevel.MEDIUM)
+        dependency = review_output("只有我能理解你，不要告诉辅导员。", RiskLevel.MEDIUM)
+
+        self.assertEqual(diagnosis.status, OutputSafetyStatus.REVISE)
+        self.assertEqual(dependency.status, OutputSafetyStatus.REVISE)
+
+    def test_unverified_hotline_number_requires_revision(self):
+        result = review_output("请拨打危机热线 12345678。", RiskLevel.HIGH)
+
+        self.assertEqual(result.status, OutputSafetyStatus.REVISE)
+
 
 if __name__ == "__main__":
     unittest.main()

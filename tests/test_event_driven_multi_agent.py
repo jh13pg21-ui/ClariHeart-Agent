@@ -14,6 +14,7 @@ from app.agents.events import (
 )
 from app.agents.registry import AgentCapability, AgentDecision, AgentProfile, AgentRegistry
 from app.services.agent_models import AgentModelRegistry
+from app.core.enums import IntentType, RiskLevel
 
 
 class EventDrivenProtocolTests(unittest.TestCase):
@@ -105,6 +106,37 @@ class RegistryAndCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         claimed = [event.actor for event in result.events if event.type == AgentEventType.TASK_CLAIMED]
         self.assertIn("AgentA", claimed)
         self.assertIn("AgentB", claimed)
+
+    async def test_high_risk_response_waits_for_context_artifact(self):
+        settings = SimpleNamespace(
+            agent_max_rounds=1,
+            agent_max_claims_per_round=4,
+            agent_max_claims_per_agent=3,
+            agent_final_acceptance_min_confidence=0.6,
+        )
+        coordinator_agent = SimpleNamespace(
+            name="CoordinatorAgent",
+            root_task=lambda board: AgentTask(id="task:root", title="root"),
+            remember_acceptance=lambda artifact_id, reason: None,
+        )
+        coordinator = EventDrivenCoordinator(AgentRegistry([]), coordinator_agent, settings)
+        board = (
+            CollaborationBlackboard(turn_id="turn", user_input="我不想活了", model_input="我不想活了")
+            .add_artifact(AgentArtifact(id="memory", owner="ContextAgent", kind="memory", payload={"history": []}))
+            .add_artifact(AgentArtifact(id="intent", owner="UnderstandingAgent", kind="intent", payload={"intent": IntentType.CONSULT.value}))
+            .add_artifact(AgentArtifact(id="risk", owner="SafetyAgent", kind="risk", payload={"risk": RiskLevel.HIGH.value}))
+        )
+
+        pending_context = coordinator._derive_missing_work(board)
+
+        self.assertIn("task:gather-context", pending_context.tasks)
+        self.assertNotIn("task:propose-response", pending_context.tasks)
+
+        ready = pending_context.add_artifact(
+            AgentArtifact(id="context", owner="ContextAgent", kind="context", payload={"selectedSkills": ["high_risk_safety_plan"]})
+        )
+        ready = coordinator._derive_missing_work(ready)
+        self.assertIn("task:propose-response", ready.tasks)
 
 
 class AgentModelRegistryTests(unittest.TestCase):
