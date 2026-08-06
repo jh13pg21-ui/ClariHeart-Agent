@@ -224,6 +224,38 @@ class RedisShortTermMemoryStore:
     def _summary_key(self, session_public_id: str) -> str:
         return f"mindbridge:conversation-summary:{session_public_id}"
 
+    def _structured_summary_key(self, session_public_id: str) -> str:
+        return f"mindbridge:structured-conversation-summary:{session_public_id}"
+
+    def load_structured_summary_cache(self, session_public_id: str) -> str | None:
+        if self.client is None:
+            return None
+        try:
+            return self.client.get(self._structured_summary_key(session_public_id))
+        except Exception as exc:
+            logger.warning("Redis structured summary read unavailable: %s", exc)
+            return None
+
+    def save_structured_summary_cache(self, session_public_id: str, payload: str) -> None:
+        if self.client is None:
+            return
+        try:
+            self.client.set(
+                self._structured_summary_key(session_public_id),
+                payload,
+                ex=self.settings.redis_memory_ttl_seconds,
+            )
+        except Exception as exc:
+            logger.warning("Redis structured summary write unavailable: %s", exc)
+
+    def delete_structured_summary_cache(self, session_public_id: str) -> None:
+        if self.client is None:
+            return
+        try:
+            self.client.delete(self._structured_summary_key(session_public_id))
+        except Exception as exc:
+            logger.warning("Redis structured summary delete unavailable: %s", exc)
+
     def _load_summary_state(self, session_public_id: str) -> ConversationSummaryState | None:
         if self.client is None:
             return None

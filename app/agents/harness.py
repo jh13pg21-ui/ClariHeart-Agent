@@ -13,6 +13,7 @@ from app.core.enums import IntentType, MessageRole, RiskLevel
 from app.models.entities import ChatMessage, ChatSession, PsychologicalReport, UserAccount
 from app.schemas.dtos import AiMessage, ChatRequest
 from app.services.assessment import PsychologyAssessment
+from app.services.conversation_summary import ConversationSummaryService
 from app.services.knowledge import SearchResult
 from app.services.long_term_memory import LongTermMemoryService
 from app.services.memory import RedisShortTermMemoryStore
@@ -138,6 +139,18 @@ class MindBridgeAgentHarness:
             content,
         )
         self.db.flush()
+        if ConversationSummaryService(
+            self.db,
+            self.settings,
+        ).should_schedule_refresh(session, message):
+            OutboxService.add_event(
+                self.db,
+                "memory.summary.refresh",
+                "chat_message",
+                message.id,
+                {"riskLevel": None},
+                f"memory.summary.refresh:{message.id}",
+            )
         if extract_long_term_memory and LongTermMemoryService(
             self.db,
             self.settings,

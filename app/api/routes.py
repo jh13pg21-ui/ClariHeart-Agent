@@ -112,6 +112,12 @@ def agent_status(user: Annotated[UserAccount, Depends(current_user)]):
                 "maxAttempts": settings.agent_task_max_attempts,
                 "strategy": "failure classification + exponential backoff + task-level fallback artifact",
             },
+            "memory": {
+                "shortTerm": "Redis sliding window with MySQL fallback",
+                "conversationSummary": "LLM structured MySQL checkpoint with Redis cache and deterministic fallback",
+                "summaryRefresh": "Transactional Outbox + RabbitMQ + Celery",
+                "longTerm": "user-scoped MySQL memories selected by index",
+            },
         },
     }
 

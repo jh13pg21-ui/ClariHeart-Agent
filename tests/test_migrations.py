@@ -25,6 +25,7 @@ NEW_TABLES = {
     "outbox_events",
     "processed_messages",
     "long_term_memories",
+    "conversation_memory_summaries",
 }
 
 
@@ -236,7 +237,7 @@ class MigrationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             scalar_sql(self.legacy_url, "SELECT version_num FROM alembic_version"),
-            "0006_privacy_controls",
+            "0007_structured_summary",
         )
 
     def test_unknown_or_incomplete_legacy_schema_is_rejected(self):

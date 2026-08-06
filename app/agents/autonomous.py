@@ -383,7 +383,7 @@ class ContextAgent(BaseAutonomousAgent):
         return AgentDecision(False, reason="context not necessary for current artifacts")
 
     async def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
-        from app.services.memory import compact_history_for_prompt
+        from app.services.conversation_summary import ConversationSummaryService
         from app.services.skills import MindBridgeSkillLibrary
 
         if task.metadata.get("kind") == "memory":
@@ -391,8 +391,12 @@ class ContextAgent(BaseAutonomousAgent):
                 self.services.db,
                 self.services.session,
             )
-            compacted, brief = self.services.memory.prompt_history(
-                self.services.session.public_id,
+            compacted, brief = ConversationSummaryService(
+                self.services.db,
+                self.services.settings,
+                memory=self.services.memory,
+            ).load_prompt_history(
+                self.services.session,
                 history,
             )
             payload = {
@@ -479,19 +483,6 @@ class ContextAgent(BaseAutonomousAgent):
             return (query or model_input)[:60]
         except Exception:
             return model_input[:60]
-
-    async def _summarize_memory(self, history: list[AiMessage], current_input: str, fallback: str) -> str:
-        max_chars = max(120, self.services.settings.memory_summary_max_chars)
-        if not history:
-            return "无相关历史记忆。"
-        try:
-            summary = (await self.client().complete([
-                AiMessage(role="system", content=f"{self.profile.system_prompt}\n只输出 1-3 条中文记忆要点，不输出风险等级或诊断。"),
-                AiMessage(role="user", content=f"当前输入：\n{current_input}\n\n最近历史：\n{history[-12:]}"),
-            ])).strip()
-            return summary[:max_chars] or fallback
-        except Exception:
-            return fallback or "无相关历史记忆。"
 
     def _bounded_model_history(self, history: list[AiMessage]) -> list[AiMessage]:
         limit = max(2, self.services.settings.chat_history_limit * 2)

@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
-from app.models.entities import AgentRunTrace, ChatMessage, ChatSession, PsychologicalReport, UserAccount
+from app.models.entities import AgentRunTrace, ChatMessage, ChatSession, ConversationMemorySummary, PsychologicalReport, UserAccount
 from app.services.privacy_retention import PrivacyRetentionService, REDACTED_CONTENT, REDACTED_TITLE
 
 
@@ -52,6 +52,19 @@ class PrivacyRetentionTests(unittest.TestCase):
         old_time = datetime.utcnow() - timedelta(days=400)
         self.db.add_all(
             [
+                ConversationMemorySummary(
+                    session_id=old.id,
+                    schema_version=1,
+                    summary_json='{"studentConcerns":[]}',
+                    source_message_count=2,
+                    model_provider="ollama",
+                    model_name="test",
+                    prompt_version="structured-summary-v1",
+                    status="LLM",
+                    last_error="",
+                    created_at=old_time,
+                    updated_at=old_time,
+                ),
                 PsychologicalReport(
                     user_id=self.user.id,
                     session_id=old.id,
@@ -99,6 +112,8 @@ class PrivacyRetentionTests(unittest.TestCase):
         ).purge_expired()
 
         self.assertEqual(result.messages, 1)
+        self.assertEqual(result.summaries, 1)
+        self.assertEqual(self.db.query(ConversationMemorySummary).count(), 0)
         self.assertEqual(self.db.get(ChatSession, old.id).title, REDACTED_TITLE)
         self.assertEqual(old.messages[0].content, REDACTED_CONTENT)
         self.assertEqual(protected.messages[0].content, "原始敏感正文")

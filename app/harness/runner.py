@@ -38,6 +38,7 @@ class HarnessContext:
 
 class InMemoryShortTermMemoryStore:
     _messages: dict[str, list[object]] = {}
+    _structured_summaries: dict[str, str] = {}
 
     def __init__(self, settings):
         self.settings = settings
@@ -94,9 +95,19 @@ class InMemoryShortTermMemoryStore:
             for message in list(messages)[-self.settings.redis_memory_max_messages:]
         ]
 
+    def load_structured_summary_cache(self, session_public_id: str) -> str | None:
+        return self._structured_summaries.get(session_public_id)
+
+    def save_structured_summary_cache(self, session_public_id: str, payload: str) -> None:
+        self._structured_summaries[session_public_id] = payload
+
+    def delete_structured_summary_cache(self, session_public_id: str) -> None:
+        self._structured_summaries.pop(session_public_id, None)
+
     @classmethod
     def reset(cls) -> None:
         cls._messages.clear()
+        cls._structured_summaries.clear()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -104,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--suite",
         action="append",
-        choices=["risk", "routing", "skills", "rag", "api", "all"],
+        choices=["risk", "routing", "skills", "memory", "rag", "api", "all"],
         default=None,
         help="Harness suite to run. Can be supplied multiple times.",
     )
@@ -205,6 +216,7 @@ def resolve_suites(requested: list[str] | None) -> list[tuple[str, Callable[[Har
         ("Risk Safety Harness", run_risk_safety_harness),
         ("Agent Routing Harness", run_agent_routing_harness),
         ("Standard Skills Harness", run_standard_skills_harness),
+        ("Structured Memory Harness", run_structured_memory_harness),
         ("RAG Harness", run_rag_harness),
         ("API Harness", run_api_harness),
     ]
@@ -215,6 +227,7 @@ def resolve_suites(requested: list[str] | None) -> list[tuple[str, Callable[[Har
         "risk": "Risk Safety Harness",
         "routing": "Agent Routing Harness",
         "skills": "Standard Skills Harness",
+        "memory": "Structured Memory Harness",
         "rag": "RAG Harness",
         "api": "API Harness",
     }
@@ -233,6 +246,83 @@ def run_check(name: str, fn: Callable[[HarnessContext], dict], context: HarnessC
             passed=False,
             failures=[f"{type(exc).__name__}: {exc}", traceback.format_exc()],
         )
+
+
+def run_structured_memory_harness(context: HarnessContext) -> dict:
+    from app.models.entities import ChatMessage, ChatSession, ConversationMemorySummary, UserAccount
+    from app.services.conversation_summary import ConversationSummaryService
+
+    db = context.session()
+    previous_llm_enabled = context.settings.memory_summary_llm_enabled
+    try:
+        context.settings.memory_summary_llm_enabled = False
+        user = db.query(UserAccount).filter_by(username="student").one()
+        session = ChatSession(
+            public_id=f"memory-harness-{uuid.uuid4().hex[:10]}",
+            user_id=user.id,
+            title="结构化摘要 Harness",
+        )
+        db.add(session)
+        db.flush()
+        contents = [
+            "我正在准备秋招，主要担心技术面试。",
+            "我们可以先梳理技术面试准备重点。",
+            "我更喜欢先给结论，再给三个步骤。",
+            "好的，之后我会按这个方式回答。",
+            "我这周还要完成项目复盘。",
+            "可以按背景、行动和结果整理。",
+            "我已经整理好了背景。",
+            "下一步可以补充关键行动。",
+            "结果部分还没有完成。",
+            "我们可以在下一轮继续。",
+            "请记得继续帮我准备技术面试。",
+            "好的，我会结合这些上下文。",
+        ]
+        rows = [
+            ChatMessage(
+                user_id=user.id,
+                session_id=session.id,
+                role="USER" if index % 2 == 0 else "ASSISTANT",
+                content=content,
+            )
+            for index, content in enumerate(contents)
+        ]
+        db.add_all(rows)
+        db.commit()
+        memory = InMemoryShortTermMemoryStore(context.settings)
+        service = ConversationSummaryService(
+            db,
+            context.settings,
+            memory=memory,
+        )
+        expect(
+            service.should_schedule_refresh(session, rows[-1]),
+            "structured summary did not become due after twelve messages",
+        )
+        record = asyncio.run(service.refresh_for_assistant_message(rows[-1].id))
+        expect(record is not None, "structured summary refresh returned no checkpoint")
+        db.commit()
+        service.cache_record(record)
+        prompt, brief = service.load_prompt_history(session, [])
+        stored = db.query(ConversationMemorySummary).filter_by(session_id=session.id).one()
+        expect(stored.status == "FALLBACK", "deterministic fallback status was not persisted")
+        expect(stored.through_message_id == rows[3].id, "summary watermark did not preserve eight recent messages")
+        expect(len(prompt) == 9, "summary prompt did not contain one summary plus eight recent messages")
+        expect("准备秋招" in brief, "fallback summary lost the student's substantive concern")
+        expect(
+            bool(memory.load_structured_summary_cache(session.public_id)),
+            "structured summary was not cached",
+        )
+        return {
+            "status": stored.status,
+            "throughMessageId": stored.through_message_id,
+            "sourceMessageCount": stored.source_message_count,
+            "promptMessages": len(prompt),
+            "cachePresent": True,
+        }
+    finally:
+        context.settings.memory_summary_llm_enabled = previous_llm_enabled
+        db.close()
 
 
 def run_risk_safety_harness(context: HarnessContext) -> dict:

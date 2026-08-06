@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     memory_compaction_recent_messages: int = 8
     memory_summary_refresh_messages: int = 4
     memory_summary_max_chars: int = 500
+    memory_summary_llm_enabled: bool = True
+    memory_summary_llm_attempts: int = 2
+    memory_summary_max_source_messages: int = 40
+    memory_summary_input_max_chars: int = 12000
     skill_semantic_selection_enabled: bool = True
     skill_semantic_selection_max_optional: int = 2
     long_term_memory_enabled: bool = True

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.models.entities import AgentRunTrace, ChatMessage, ChatSession, PsychologicalReport
+from app.models.entities import AgentRunTrace, ChatMessage, ChatSession, ConversationMemorySummary, PsychologicalReport
 
 
 REDACTED_CONTENT = "[内容已按数据保留策略清除]"
@@ -18,6 +18,7 @@ class RetentionResult:
     sessions: int = 0
     reports: int = 0
     traces: int = 0
+    summaries: int = 0
 
 
 class PrivacyRetentionService:
@@ -37,7 +38,7 @@ class PrivacyRetentionService:
         risk_cutoff = current - timedelta(
             days=max(1, int(getattr(self.settings, "risk_data_retention_days", 1095)))
         )
-        reports = traces = messages = sessions = 0
+        reports = traces = messages = sessions = summaries = 0
 
         for report in self.db.query(PsychologicalReport).all():
             cutoff = risk_cutoff if report.risk_level in {"MEDIUM", "HIGH"} else chat_cutoff
@@ -74,6 +75,11 @@ class PrivacyRetentionService:
 
         for session in self.db.query(ChatSession).filter(ChatSession.updated_at < chat_cutoff).all():
             if session.id not in protected_sessions and session.title != REDACTED_TITLE:
+                summaries += (
+                    self.db.query(ConversationMemorySummary)
+                    .filter(ConversationMemorySummary.session_id == session.id)
+                    .delete(synchronize_session=False)
+                )
                 session.title = REDACTED_TITLE
                 self.db.add(session)
                 sessions += 1
@@ -84,4 +90,5 @@ class PrivacyRetentionService:
             sessions=sessions,
             reports=reports,
             traces=traces,
+            summaries=summaries,
         )

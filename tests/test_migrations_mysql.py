@@ -54,7 +54,7 @@ class MySqlMigrationWorkflowTests(unittest.TestCase):
         result = self._upgrade()
         self.assertEqual(result.returncode, 0, result.stderr)
         with self.engine.connect() as connection:
-            self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one(), "0002_auth_audit_outbox_schema")
+            self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one(), "0007_structured_summary")
             self.assertEqual(connection.execute(text("SELECT password_hash FROM user_accounts WHERE id=1")).scalar_one(), "legacy-hash")
             self.assertEqual(connection.execute(text("SELECT content FROM chat_messages WHERE id=1")).scalar_one(), "preserve-me")
 
@@ -65,7 +65,7 @@ class MySqlMigrationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         with self.engine.connect() as connection:
             self.assertEqual(connection.execute(text("SELECT COUNT(*) FROM alembic_version")).scalar_one(), 1)
-            self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one(), "0002_auth_audit_outbox_schema")
+            self.assertEqual(connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one(), "0007_structured_summary")
 
     def test_mysql_type_length_drift_is_rejected_without_version_table(self):
         self._legacy_baseline()

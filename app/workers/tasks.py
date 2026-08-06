@@ -22,7 +22,9 @@ from app.models.entities import (
     ToolJob,
 )
 from app.services.outbox import OutboxService
+from app.services.conversation_summary import ConversationSummaryService
 from app.services.long_term_memory import LongTermMemoryService
+from app.services.memory import RedisShortTermMemoryStore
 from app.services.privacy_retention import PrivacyRetentionService
 from app.services.tool_governance import ToolGovernanceService
 from app.services.tools import ToolOrchestrationService
@@ -53,6 +55,7 @@ def purge_expired_private_data() -> dict:
             "sessions": result.sessions,
             "reports": result.reports,
             "traces": result.traces,
+            "summaries": result.summaries,
         }
     except Exception:
         db.rollback()
@@ -112,6 +115,73 @@ def extract_long_term_memory(
             "eventId": event_id,
             "messageId": assistant_message_id,
             "stored": len(stored),
+        }
+    except RetryableTaskError:
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.workers.tasks.refresh_conversation_summary",
+    autoretry_for=(RetryableTaskError,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=5,
+)
+def refresh_conversation_summary(
+    event_id: str,
+    assistant_message_id: int,
+) -> dict:
+    db: Session = SessionLocal()
+    try:
+        marker = _claim_message(
+            db,
+            "refresh_conversation_summary",
+            event_id,
+        )
+        if marker is None:
+            return {"status": "ALREADY_PROCESSED", "eventId": event_id}
+        message = db.get(ChatMessage, assistant_message_id)
+        if message is None:
+            db.commit()
+            return {
+                "status": "NOT_FOUND",
+                "eventId": event_id,
+                "messageId": assistant_message_id,
+            }
+        memory = RedisShortTermMemoryStore(worker_settings)
+        service = ConversationSummaryService(
+            db,
+            worker_settings,
+            memory=memory,
+        )
+        try:
+            record = asyncio.run(
+                service.refresh_for_assistant_message(assistant_message_id)
+            )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            raise RetryableTaskError(
+                f"结构化会话摘要刷新失败：{type(exc).__name__}: {exc}"
+            ) from exc
+        if record is None:
+            return {
+                "status": "NOT_DUE",
+                "eventId": event_id,
+                "messageId": assistant_message_id,
+            }
+        service.cache_record(record)
+        return {
+            "status": "SUCCESS",
+            "eventId": event_id,
+            "messageId": assistant_message_id,
+            "throughMessageId": record.through_message_id,
+            "summaryStatus": record.status,
         }
     except RetryableTaskError:
         raise

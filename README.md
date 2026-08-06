@@ -9,7 +9,8 @@
 - Chroma 向量 RAG 知识库：支持 Markdown、txt、PDF 文件上传，自动切块，使用 `text-embedding-3-small` 写入向量库，并与 BM25 关键词召回融合后进入本地 reranker；向量不可用时保留本地 BM25 + 词面检索兜底。
 - 心理风险评估：可解释安全门优先、LLM JSON 评估、保守规则兜底，并附带独立风险评测集和混淆矩阵。
 - 后台报告：记录情绪标签、情绪分数、风险等级、置信度和摘要，但学生端不展示后台评估结果。
-- 数据闭环：咨询/风险消息完整写入 MySQL，短期上下文写入 Redis，高风险消息写入 Excel 台账并通过邮件发送预警。
+- 分层记忆：完整对话写入 MySQL，Redis 保存短期窗口；本地 LLM 通过 Outbox/Celery 异步生成带证据消息 ID 的结构化会话摘要，以 MySQL 为权威检查点、Redis 为缓存，并保留确定性摘要降级。
+- 数据闭环：咨询/风险消息完整写入 MySQL，高风险消息写入 Excel 台账并通过邮件发送预警。
 - 本地微调模型接入：支持通过 Ollama 加载 `mindbridge-qwen2.5-7b-ft-q4_k_m.gguf`。
 - OpenAI-compatible API 接入：也可切换到云端模型。
 - RabbitMQ / Celery 异步后处理：通过事务 Outbox 可靠发布 Excel 台账、个案创建和风险通知任务；MCP 工具服务保留为独立集成入口。
@@ -122,13 +123,26 @@ DATABASE_URL=mysql+pymysql://mindbridge:mindbridge@127.0.0.1:3306/mindbridge?cha
 REDIS_URL=redis://127.0.0.1:6379/0
 REDIS_MEMORY_TTL_SECONDS=86400
 REDIS_MEMORY_MAX_MESSAGES=40
+MEMORY_COMPACTION_ENABLED=true
+MEMORY_COMPACTION_RECENT_MESSAGES=8
+MEMORY_SUMMARY_REFRESH_MESSAGES=4
+MEMORY_SUMMARY_MAX_CHARS=500
+MEMORY_SUMMARY_LLM_ENABLED=true
+MEMORY_SUMMARY_LLM_ATTEMPTS=2
+MEMORY_SUMMARY_MAX_SOURCE_MESSAGES=40
+MEMORY_SUMMARY_INPUT_MAX_CHARS=12000
 LONG_TERM_MEMORY_ENABLED=true
 LONG_TERM_MEMORY_MAX_ITEMS=200
 LONG_TERM_MEMORY_RELEVANT_ITEMS=5
 LONG_TERM_MEMORY_EXTRACT_MESSAGES=10
+LONG_TERM_MEMORY_EXTRACT_MIN_NEW_MESSAGES=6
 ```
 
 完整聊天记录写入 MySQL 的 `chat_sessions`、`chat_messages` 等表。Redis 只保存每个会话最近 `REDIS_MEMORY_MAX_MESSAGES` 条短期上下文，并通过 `REDIS_MEMORY_TTL_SECONDS` 自动过期。
+
+短期摘要采用异步增量压缩：保留最近 `MEMORY_COMPACTION_RECENT_MESSAGES` 条原始消息；累计 `MEMORY_SUMMARY_REFRESH_MESSAGES` 条可压缩消息后，在回复落库的同一事务中写入 `memory.summary.refresh` Outbox 事件，经 RabbitMQ 交给通用 Celery worker。worker 使用当前 `AI_PROVIDER`（本地部署默认 Ollama）把旧摘要和新增消息更新成严格 JSON，保存关注主题、互动偏好、明确有效的支持方式、待继续事项和安全连续性，并要求每项携带可校验的证据消息 ID。权威检查点写入 MySQL 的 `conversation_memory_summaries`，脱敏后的副本缓存到 Redis；新一轮 `ContextAgent` 读取结构化摘要和最近原文。模型超时、输出格式错误、证据 ID 越界或隐私校验失败时，系统自动使用确定性摘要，不阻断聊天。
+
+结构化摘要不保存联系方式、身份证、地址、密码、诊断标签、风险等级或自杀自残具体方法。安全相关原话只折叠为“存在需要后续关注的安全信号”，且不会取代 SafetyAgent 对本轮输入的独立风险复核。摘要生成是异步任务，worker 尚未完成时会临时使用上一版摘要和未压缩原文，因此不会增加学生端首 Token 延迟。
 
 跨会话长期记忆写入 MySQL 的 `long_term_memories` 表。每轮回复落库后，
 Outbox 经 RabbitMQ 将 `memory.extract` 任务交给通用 Celery worker；worker
@@ -442,6 +456,7 @@ python -m unittest discover -s tests
 - Risk Safety Harness：高风险识别、报告生成、后台元数据不外显、事务 Outbox 事件生成。
 - Agent Routing Harness：通过 `MindBridgeAgentHarness` 验证 CHAT / CONSULT 与独立风险维度的路由和多 Agent 步骤。
 - Standard Skills Harness：验证 `skills/*/SKILL.md` 标准 Skill 加载、选择逻辑和交接摘要模板渲染。
+- Structured Memory Harness：验证结构化摘要触发阈值、MySQL 检查点、Redis 缓存、消息水位线、最近原文窗口和确定性降级。
 - RAG Harness：基于内置评测集验证 Recall@K、MRR、NDCG 和 HitRate。
 - API Harness：健康检查、认证授权、SSE 聊天、管理员知识库接口。
 

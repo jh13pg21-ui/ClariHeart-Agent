@@ -50,6 +50,10 @@ celery_app.conf.update(
             "queue": settings.celery_general_queue,
             "routing_key": settings.celery_general_queue,
         },
+        "app.workers.tasks.refresh_conversation_summary": {
+            "queue": settings.celery_general_queue,
+            "routing_key": settings.celery_general_queue,
+        },
         "app.workers.tasks.purge_expired_private_data": {
             "queue": settings.celery_general_queue,
             "routing_key": settings.celery_general_queue,

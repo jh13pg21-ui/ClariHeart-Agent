@@ -51,6 +51,11 @@ class ChatSession(Base):
 
     user: Mapped[UserAccount] = relationship(back_populates="sessions")
     messages: Mapped[list["ChatMessage"]] = relationship(back_populates="session", cascade="all, delete-orphan")
+    conversation_summary: Mapped[Optional["ConversationMemorySummary"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     def touch(self) -> None:
         self.updated_at = now()
@@ -67,6 +72,30 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     session: Mapped[ChatSession] = relationship(back_populates="messages")
+
+
+class ConversationMemorySummary(Base):
+    __tablename__ = "conversation_memory_summaries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("chat_sessions.id"),
+        unique=True,
+        index=True,
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    through_message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    source_message_count: Mapped[int] = mapped_column(Integer, default=0)
+    model_provider: Mapped[str] = mapped_column(String(32), default="")
+    model_name: Mapped[str] = mapped_column(String(128), default="")
+    prompt_version: Mapped[str] = mapped_column(String(64), default="structured-summary-v1")
+    status: Mapped[str] = mapped_column(String(32), default="PENDING", index=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    session: Mapped[ChatSession] = relationship(back_populates="conversation_summary")
 
 
 class LongTermMemory(Base):

@@ -39,7 +39,13 @@ class MemoryOutboxTests(unittest.TestCase):
     def _harness(self):
         harness = MindBridgeAgentHarness.__new__(MindBridgeAgentHarness)
         harness.db = self.db
-        harness.settings = SimpleNamespace(long_term_memory_extract_min_new_messages=6)
+        harness.settings = SimpleNamespace(
+            long_term_memory_extract_min_new_messages=6,
+            memory_compaction_enabled=True,
+            memory_compaction_recent_messages=8,
+            memory_summary_refresh_messages=4,
+            sensitive_data_encryption_key="",
+        )
         harness.memory = SimpleNamespace(append=lambda *args: None)
         return harness
 
@@ -79,6 +85,32 @@ class MemoryOutboxTests(unittest.TestCase):
 
         self.assertEqual(self.db.query(ChatMessage).count(), 1)
         self.assertEqual(self.db.query(OutboxEvent).count(), 0)
+
+    def test_structured_summary_refresh_is_scheduled_after_twelve_messages(self):
+        for index in range(11):
+            self.db.add(
+                ChatMessage(
+                    user_id=self.user.id,
+                    session_id=self.session.id,
+                    role="USER" if index % 2 == 0 else "ASSISTANT",
+                    content=f"历史消息{index + 1}",
+                )
+            )
+        self.db.commit()
+
+        self._harness().save_assistant_message(
+            self.user,
+            self.session,
+            "第十二条消息。",
+            extract_long_term_memory=False,
+        )
+
+        events = self.db.query(OutboxEvent).all()
+        self.assertEqual([event.event_type for event in events], ["memory.summary.refresh"])
+        self.assertEqual(
+            CeleryBroker.TASKS["memory.summary.refresh"][0],
+            "app.workers.tasks.refresh_conversation_summary",
+        )
 
 
 if __name__ == "__main__":

@@ -25,6 +25,10 @@ class CeleryBroker:
             "app.workers.tasks.extract_long_term_memory",
             "general",
         ),
+        "memory.summary.refresh": (
+            "app.workers.tasks.refresh_conversation_summary",
+            "general",
+        ),
     }
 
     def __init__(self, settings: Settings):
