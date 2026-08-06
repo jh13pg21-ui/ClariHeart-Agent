@@ -66,6 +66,32 @@ class Settings(BaseSettings):
     rag_eval_output: str = "target/rag-eval-report.json"
     rag_eval_enabled: bool = False
     rag_eval_exit_after_run: bool = False
+    rag_ingestion_enabled: bool = True
+    rag_ingestion_queue: str = "mindbridge.ingestion"
+    rag_artifact_dir: str = "data/knowledge-artifacts"
+    rag_artifact_temp_retention_hours: int = 24
+    rag_parser_provider: str = "liteparse"
+    rag_liteparse_ocr_enabled: bool = False
+    rag_page_render_dpi: int = 150
+    rag_ocr_enabled: bool = True
+    rag_ocr_provider: str = "paddleocr"
+    rag_ocr_device: str = "cpu"
+    rag_ocr_worker_concurrency: int = 1
+    rag_vision_enabled: bool = True
+    rag_vision_provider: str = "openai_compatible"
+    rag_vision_model: str = "gpt-5.6-luna"
+    rag_vision_detail: str = "original"
+    rag_vision_base_url: str = ""
+    rag_vision_api_key: str = ""
+    rag_vision_timeout_seconds: float = 90.0
+    rag_vision_max_attempts: int = 2
+    rag_private_cloud_vision_default: bool = False
+    rag_child_target_tokens: int = 400
+    rag_child_min_tokens: int = 120
+    rag_child_max_tokens: int = 650
+    rag_child_overlap_tokens: int = 60
+    rag_parent_target_tokens: int = 1200
+    rag_parent_max_tokens: int = 1800
     risk_eval_dataset: str = "app/risk_eval/mindbridge-risk-eval.json"
     risk_eval_output: str = "target/risk-eval-report.json"
     excel_path: str = "data/mindbridge-risk-ledger.xlsx"
@@ -122,6 +148,14 @@ class Settings(BaseSettings):
     @property
     def project_root(self) -> Path:
         return Path(__file__).resolve().parents[2]
+
+    @property
+    def effective_rag_vision_base_url(self) -> str:
+        return (self.rag_vision_base_url or self.openai_base_url).rstrip("/")
+
+    @property
+    def effective_rag_vision_api_key(self) -> str:
+        return self.rag_vision_api_key or self.openai_api_key
 
     def validate_auth_configuration(self) -> None:
         if self.jwt_algorithm != "HS256":
