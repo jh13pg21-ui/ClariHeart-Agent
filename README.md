@@ -386,6 +386,23 @@ AI_PROVIDER=mock python -m app.rag_eval.runner
 target/rag-eval-report.json
 ```
 
+## RAG 后续演进（TODO）
+
+当前 RAG 已完成 MySQL 知识分块、OpenAI-compatible Embedding、Chroma 向量召回、BM25 混合检索和本地规则 rerank，但文档摄取仍是工程基线：PDF 使用 `pypdf` 提取纯文本，Markdown/TXT 按 UTF-8 解码，再以 512 字符、64 字符重叠的固定窗口切块。该方案可以验证完整链路，但对扫描件、复杂排版、表格、标题层级、页码溯源和中文语义边界的处理仍然有限。
+
+后续将参考 [LiteParse OCR 在精细化 RAG 文档解析中的实践](https://paicoding.com/liteparse-ocr-review)，按以下阶段升级；参考项目只作为设计输入，最终实现需适配 MindBridge 的 Python、Docker、本地模型和校园心理数据隐私边界：
+
+- [ ] 建立可插拔 `DocumentParser` 层，区分 PDF、Markdown、TXT、图片与 Office 文档；优先保留结构化解析结果，不再把所有文档立即压成单段纯文本。
+- [ ] 为 PDF 接入本地 LiteParse/PDFium 解析，并对扫描页或文本稀疏页按需启用 Tesseract OCR；Docker 镜像预装 `chi_sim+eng` 语言包，OCR 默认在本地完成。
+- [ ] 保存页码、段落、标题路径、文本边界框和解析器版本等 metadata，使召回结果能够定位到原文页和具体片段，并为前端引用展示预留接口。
+- [ ] 将固定字符窗口升级为结构感知的父文档—子切片策略：优先按标题、页、段落和句子边界切分，超长内容再递归切分；配置最小块、目标块和重叠大小，并避免从中文词语中间截断。
+- [ ] 将文档解析、切块、Embedding 和索引构建改为异步摄取任务，增加文件大小/页数限制、超时、并发隔离、失败重试、临时文件清理和可查询的任务状态，避免 OCR 阻塞 FastAPI 请求线程。
+- [ ] 增加文件哈希、Chunk 稳定 ID、去重和增量更新；文档未变化时不重复解析和计费，局部变化时只重建受影响的 Embedding 与 Chroma 索引。
+- [ ] 抽象 Embedding Provider，支持 OpenAI-compatible 与本地 Ollama Embedding；记录模型名、版本和向量维度，模型切换时创建新 Collection 并执行受控重建，禁止混用不同向量空间。
+- [ ] 将当前规则型 reranker 升级为可插拔 reranker，并补充 metadata filter、动态混合权重、查询改写、去重和上下文预算控制；保留 BM25-only 降级路径。
+- [ ] 扩充 RAG 评测集，覆盖文本 PDF、扫描件、双栏排版、表格、中文长句和校园心理知识问答，同时评估解析成功率、OCR 准确度、Recall@K、MRR、NDCG、引用命中率、延迟和资源占用。
+- [ ] 落实心理健康资料的隐私治理：外部 OCR 默认关闭，启用云 OCR 前必须显式配置并完成脱敏；原文件、解析文本、Embedding、快照和临时文件统一纳入权限、审计、保留期与安全删除策略。
+
 ## 风险安全门评测
 
 ```bash
