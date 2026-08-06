@@ -194,6 +194,8 @@ class ToolOrchestrationService:
             missing.append("SMTP_HOST")
         if not self._sender():
             missing.append("ALERT_EMAIL_FROM 或 SMTP_USERNAME")
+        if self.settings.smtp_username.strip() and not self.settings.smtp_password:
+            missing.append("SMTP_PASSWORD（邮箱 SMTP 授权码）")
         if not self._recipients():
             missing.append("ALERT_EMAIL_TO")
         return missing

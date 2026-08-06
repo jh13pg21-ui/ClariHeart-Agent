@@ -150,8 +150,21 @@ ContextAgent。手机号、邮箱、身份证、高风险原话和诊断标签�
 默认配置会让应用容器访问宿主机 Ollama：
 
 ```bash
+cp .env.example .env
 docker compose up -d --build
 ```
+
+Windows PowerShell 也可以使用：
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build
+```
+
+本地通过 `http://127.0.0.1:8080` 访问时，`.env` 应配置
+`AUTH_SECURE_COOKIE=false`。部署到具有 HTTPS 的线上域名时，必须改为
+`AUTH_SECURE_COOKIE=true`，并将 `JWT_SECRET_KEY` 替换为独立生成的至少
+32 字节随机密钥。不要把真实密钥、SMTP 授权码或 `.env` 提交到 Git。
 
 如果 Ollama 已经有下列模型，容器即可使用真实本地聊天模型链路：
 
@@ -178,12 +191,18 @@ CHROMA_PERSIST_DIR=data/chroma
 CHROMA_SNAPSHOT_DIR=data/chroma-snapshots
 ```
 
-管理员接口：
+管理员接口使用 Cookie 登录与 CSRF 防护。先登录并保存 Cookie：
 
 ```bash
-curl -u admin:admin123 http://127.0.0.1:8080/api/admin/knowledge/status
-curl -u admin:admin123 -X POST http://127.0.0.1:8080/api/admin/knowledge/rebuild-vector
-curl -u admin:admin123 -X POST http://127.0.0.1:8080/api/admin/knowledge/backup
+curl -c admin.cookies -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin123"}' \
+  http://127.0.0.1:8080/api/auth/login
+ADMIN_CSRF=$(awk '$6 == "mindbridge_csrf" {print $7}' admin.cookies)
+curl -b admin.cookies http://127.0.0.1:8080/api/admin/knowledge/status
+curl -b admin.cookies -H "X-CSRF-Token: $ADMIN_CSRF" -X POST \
+  http://127.0.0.1:8080/api/admin/knowledge/rebuild-vector
+curl -b admin.cookies -H "X-CSRF-Token: $ADMIN_CSRF" -X POST \
+  http://127.0.0.1:8080/api/admin/knowledge/backup
 ```
 
 当 `KNOWLEDGE_VECTOR_REQUIRED=false` 时，如果 Chroma 或 embedding 服务不可用，系统会降级到本地 BM25 + 词面 rerank；设为 `true` 则启动或检索失败时直接暴露错误。
@@ -272,8 +291,10 @@ AI_PROVIDER=ollama ./scripts/run-dev.sh
 查看模型接入状态：
 
 ```bash
-curl -u student:student123 http://127.0.0.1:8080/api/agent/status
+curl -b student.cookies http://127.0.0.1:8080/api/agent/status
 ```
+
+这里的 `student.cookies` 由下方“调用示例”中的学生登录命令生成。
 
 返回结果中的 `finetunedModel.ggufExists` 和 `finetunedModel.modelfileExists` 会显示模型资产是否就绪。
 同时 `agentFramework.active` 会显示当前实际使用的 Agent 编排框架：
