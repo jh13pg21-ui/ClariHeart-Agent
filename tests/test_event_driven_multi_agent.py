@@ -140,6 +140,22 @@ class RegistryAndCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentModelRegistryTests(unittest.TestCase):
+    def test_client_for_reuses_gateway_per_agent_profile(self):
+        settings = SimpleNamespace(
+            ai_provider="mock",
+            ollama_model="default-model",
+            openai_model="default-openai",
+            openai_api_key="",
+            ai_temperature=0.35,
+            ai_max_tokens=512,
+        )
+        registry = AgentModelRegistry(settings)
+
+        first = registry.client_for("ResponseAgent")
+        second = registry.client_for("ResponseAgent")
+
+        self.assertIs(first, second)
+
     def test_agent_can_override_model_without_changing_global_default(self):
         settings = SimpleNamespace(
             ai_provider="ollama",

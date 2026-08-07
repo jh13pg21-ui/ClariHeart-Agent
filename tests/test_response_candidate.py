@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from app.agents.autonomous import ResponseAgent, SafetyAgent
 from app.agents.events import AgentArtifact, AgentTask, CollaborationBlackboard
 from app.core.enums import RiskLevel
+from app.llm.errors import ModelError, ModelErrorCode
 from app.schemas.dtos import AiMessage
 from app.services.output_safety import OutputSafetyStatus
 
@@ -13,12 +14,16 @@ class FakeClient:
         self.text = text
         self.calls = 0
         self.stream_chunks = stream_chunks or [text]
+        self.complete_kwargs = []
+        self.stream_kwargs = []
 
-    async def complete(self, messages):
+    async def complete(self, messages, **kwargs):
         self.calls += 1
+        self.complete_kwargs.append(kwargs)
         return self.text
 
-    async def stream(self, messages):
+    async def stream(self, messages, **kwargs):
+        self.stream_kwargs.append(kwargs)
         for chunk in self.stream_chunks:
             yield chunk
 
@@ -32,6 +37,15 @@ class FakePrivateMemory:
 
     def append(self, agent_name, session_id, content):
         return None
+
+
+class FailingClient(FakeClient):
+    def __init__(self, error):
+        super().__init__("")
+        self.error = error
+
+    async def complete(self, messages, **kwargs):
+        raise self.error
 
 
 def services(client, response_token_sink=None):
@@ -72,6 +86,68 @@ def base_board():
 
 
 class ResponseCandidateTests(unittest.IsolatedAsyncioTestCase):
+    def _high_risk_board(self):
+        return base_board().add_artifact(
+            AgentArtifact(
+                id="high-risk",
+                owner="SafetyAgent",
+                kind="risk",
+                payload={"risk": "HIGH"},
+            )
+        ).add_artifact(
+            AgentArtifact(
+                id="context",
+                owner="ContextAgent",
+                kind="context",
+                payload={"modelHistory": [AiMessage(role="user", content="我很危险")]},
+            )
+        )
+
+    async def test_exhausted_model_error_publishes_typed_local_safety_fallback(self):
+        client = FailingClient(
+            ModelError(
+                code=ModelErrorCode.OVERLOADED,
+                message="local exhausted",
+                retryable=True,
+                provider="ollama",
+                model="local-model",
+            )
+        )
+        agent = ResponseAgent(services(client))
+
+        result = await agent.act(
+            AgentTask(id="response-high", title="response"),
+            self._high_risk_board(),
+        )
+
+        candidate = result.artifacts[0]
+        self.assertEqual(candidate.payload["generationStatus"], "fallback")
+        self.assertEqual(candidate.payload["failureCode"], "OVERLOADED")
+        self.assertEqual(candidate.payload["route"], "local_safety_fallback")
+        self.assertTrue(candidate.payload["text"])
+
+    async def test_unexpected_generation_error_reaches_task_recovery_boundary(self):
+        client = FailingClient(ValueError("programming defect"))
+        agent = ResponseAgent(services(client))
+
+        with self.assertRaisesRegex(ValueError, "programming defect"):
+            await agent.act(
+                AgentTask(id="response-high", title="response"),
+                self._high_risk_board(),
+            )
+
+    async def test_response_agent_passes_actual_risk_to_model_client(self):
+        client = FakeClient("高风险安全答复。")
+        agent = ResponseAgent(services(client))
+
+        await agent.act(
+            AgentTask(id="response-high", title="response"),
+            self._high_risk_board(),
+        )
+
+        self.assertEqual(client.complete_kwargs[0]["risk_level"], RiskLevel.HIGH)
+        self.assertFalse(client.complete_kwargs[0]["cloud_egress_allowed"])
+
     async def test_response_agent_generates_text_candidate_without_messages_payload(self):
         client = FakeClient("这是最终候选文本。")
         agent = ResponseAgent(services(client))

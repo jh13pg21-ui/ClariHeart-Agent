@@ -47,6 +47,15 @@ class Settings(BaseSettings):
     model_openai_tokenizer_kind: str = "tiktoken"
     model_recovery_reserve_tokens: int = 1024
     model_provider_safety_margin_ratio: float = 0.10
+    model_cloud_fallback_enabled: bool = True
+    model_recovery_max_transient_retries: int = 2
+    model_recovery_max_stream_retries: int = 1
+    model_recovery_deadline_seconds: float = 65.0
+    model_recovery_base_delay_seconds: float = 0.5
+    model_recovery_max_delay_seconds: float = 32.0
+    model_recovery_jitter_ratio: float = 0.25
+    model_recovery_max_continuations: int = 2
+    model_stream_release_chars: int = 256
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "mindbridge-qwen2.5-7b-ft:latest"
     finetuned_model_name: str = "mindbridge-qwen2.5-7b-ft:latest"

@@ -22,6 +22,7 @@ from app.agents.events import (
 from app.agents.registry import AgentCapability, AgentDecision, AgentProfile
 from app.core.config import Settings
 from app.core.enums import IntentType, RiskLevel
+from app.llm.errors import ModelError
 from app.schemas.dtos import AiMessage
 from app.services.agent_models import AgentModelRegistry
 from app.services.ai import AiClient, PromptTemplates, has_consult_signal, has_high_risk_signal
@@ -590,8 +591,26 @@ class ResponseAgent(BaseAutonomousAgent):
         profile = self.services.model_registry.profile_for(self.name)
         started = time.perf_counter()
         generation_status = "generated"
+        failure_code = ""
+        route = "primary"
+        actual_provider = profile.provider
+        actual_model = profile.model
         revision_count = int(task.metadata.get("revisionCount", 0))
         response_token_sink = getattr(self.services, "response_token_sink", None)
+        cloud_egress_allowed = (
+            risk != RiskLevel.HIGH
+            and bool(getattr(self.services.settings, "model_cloud_fallback_enabled", True))
+        )
+        model_metadata = {
+            "agent_name": self.name,
+            "task_name": task.id,
+            "risk_level": risk,
+            "cloud_egress_allowed": cloud_egress_allowed,
+            "context_section_ids": tuple(
+                f"response-message-{index}" for index in range(len(messages))
+            ),
+        }
+        client = self.client()
         try:
             if (
                 intent == IntentType.CHAT
@@ -603,7 +622,7 @@ class ResponseAgent(BaseAutonomousAgent):
                 stream_allowed = True
                 stream_buffer = ""
                 reviewed_stream_text = ""
-                async for chunk in self.client().stream(messages):
+                async for chunk in client.stream(messages, **model_metadata):
                     if not chunk:
                         continue
                     chunks.append(chunk)
@@ -626,24 +645,45 @@ class ResponseAgent(BaseAutonomousAgent):
                         stream_allowed = False
                 text = "".join(chunks).strip()
             else:
-                text = (await self.client().complete(messages)).strip()
-        except Exception:
+                if hasattr(client, "complete_result"):
+                    model_result = await client.complete_result(messages, **model_metadata)
+                    text = model_result.text.strip()
+                    actual_provider = model_result.provider
+                    actual_model = model_result.model
+                    route = (
+                        "cloud_fallback"
+                        if model_result.provider != profile.provider
+                        else "primary"
+                    )
+                    if model_result.partial:
+                        generation_status = "partial"
+                else:
+                    text = (await client.complete(messages, **model_metadata)).strip()
+        except ModelError as error:
             text = safe_fallback(risk)
             generation_status = "fallback"
+            failure_code = error.code.value
+            route = (
+                "local_safety_fallback"
+                if risk == RiskLevel.HIGH
+                else "deterministic_fallback"
+            )
         latency_ms = round((time.perf_counter() - started) * 1000, 3)
         prompt_summary = "\n".join(
             f"{message.role}:{message.content}" for message in messages
         )
         payload = {
             "text": text,
-            "model": profile.model,
-            "provider": profile.provider,
+            "model": actual_model,
+            "provider": actual_provider,
             "latencyMs": latency_ms,
             "mode": mode,
             "intent": intent.value,
             "risk": risk.value,
             "revisionCount": revision_count,
             "generationStatus": generation_status,
+            "failureCode": failure_code,
+            "route": route,
             "responseAgent": self.name,
             "privateMemoryKey": self.services.private_memory._key(self.name, self.services.session.public_id),
         }

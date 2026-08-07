@@ -33,6 +33,7 @@ class AgentModelRegistry:
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(60.0, connect=5.0, read=45.0, write=15.0, pool=5.0)
         )
+        self._clients: dict[str, AiClient] = {}
 
     def profile_for(self, agent_name: str) -> AgentModelProfile:
         alias = AGENT_MODEL_ALIASES.get(agent_name, _snake(agent_name.removesuffix("Agent")))
@@ -43,6 +44,9 @@ class AgentModelRegistry:
         return AgentModelProfile(provider=provider, model=model, temperature=temperature, max_tokens=max_tokens)
 
     def client_for(self, agent_name: str) -> AiClient:
+        cached = self._clients.get(agent_name)
+        if cached is not None:
+            return cached
         profile = self.profile_for(agent_name)
         settings = copy.copy(self.settings)
         settings.ai_provider = profile.provider
@@ -52,7 +56,13 @@ class AgentModelRegistry:
             settings.openai_model = profile.model
         else:
             settings.ollama_model = profile.model
-        return AiClient(settings, http_client=self.http_client)
+        client = AiClient(settings, http_client=self.http_client)
+        self._clients[agent_name] = client
+        return client
+
+    async def aclose(self) -> None:
+        self._clients.clear()
+        await self.http_client.aclose()
 
     def _setting(self, name: str, fallback: Any) -> Any:
         value = getattr(self.settings, name, None)

@@ -25,7 +25,7 @@ class CapturingClient:
         self.response = response
         self.calls: list[list[AiMessage]] = []
 
-    async def complete(self, messages: list[AiMessage]) -> str:
+    async def complete(self, messages: list[AiMessage], **kwargs) -> str:
         self.calls.append(messages)
         return self.response
 
