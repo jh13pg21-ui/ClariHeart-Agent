@@ -31,6 +31,7 @@ _TRANSIENT_CODES = frozenset(
 @dataclass(frozen=True)
 class RecoveryPolicy:
     max_transient_retries: int = 2
+    max_stream_retries: int = 1
     deadline_seconds: float = 20.0
     base_delay_seconds: float = 0.5
     maximum_delay_seconds: float = 32.0
@@ -40,6 +41,8 @@ class RecoveryPolicy:
     def __post_init__(self) -> None:
         if self.max_transient_retries < 0:
             raise ValueError("max_transient_retries 不能小于 0")
+        if self.max_stream_retries < 0:
+            raise ValueError("max_stream_retries 不能小于 0")
         if self.deadline_seconds <= 0:
             raise ValueError("deadline_seconds 必须大于 0")
         if self.base_delay_seconds < 0 or self.maximum_delay_seconds < 0:
