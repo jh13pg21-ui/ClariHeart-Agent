@@ -15,6 +15,7 @@ from app.models.entities import (
     KnowledgeDocumentVersion,
     KnowledgeIngestionJob,
     MemoryConsolidationRun,
+    MemoryDreamState,
     OutboxEvent,
 )
 from app.workers.celery_app import celery_app
@@ -161,6 +162,18 @@ class OutboxPublisher:
                 run.finished_at = datetime.utcnow()
                 run.updated_at = datetime.utcnow()
                 db.add(run)
+                state = (
+                    db.query(MemoryDreamState)
+                    .filter(MemoryDreamState.user_id == run.user_id)
+                    .first()
+                )
+                if state is not None and state.lease_owner == run.public_id:
+                    state.lease_owner = ""
+                    state.lease_acquired_at = None
+                    state.lease_expires_at = None
+                    state.last_error = run.last_error
+                    state.updated_at = datetime.utcnow()
+                    db.add(state)
             return
         if event.event_type == "memory.summary.refresh":
             message = db.get(ChatMessage, int(event.aggregate_id))

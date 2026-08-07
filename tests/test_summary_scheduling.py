@@ -92,7 +92,7 @@ class SummarySchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.through_message_id, rows[3].id)
         self.assertIsNone(record.scheduled_through_message_id)
         self.assertEqual(record.refresh_reason, "async_outbox")
-        self.assertEqual(record.prompt_release, "2026.08-v1")
+        self.assertEqual(record.prompt_release, "2026.08-v2")
         self.assertGreater(record.input_tokens, 0)
         self.assertGreater(record.output_tokens, 0)
 

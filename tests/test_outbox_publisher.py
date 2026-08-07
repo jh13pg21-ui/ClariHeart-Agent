@@ -15,6 +15,8 @@ from app.models.entities import (
     KnowledgeDocument,
     KnowledgeDocumentVersion,
     KnowledgeIngestionJob,
+    MemoryConsolidationRun,
+    MemoryDreamState,
     OutboxEvent,
     UserAccount,
 )
@@ -209,6 +211,43 @@ class OutboxPublisherTests(unittest.TestCase):
             kwargs["queue"],
             "mindbridge.general",
         )
+
+    def test_terminal_consolidation_publish_failure_releases_dream_lease(self):
+        db = self.Session()
+        user = UserAccount(username="dream-publish", display_name="学生", password_hash="hash")
+        db.add(user)
+        db.flush()
+        run = MemoryConsolidationRun(
+            public_id="dream-publish-run",
+            user_id=user.id,
+            status="QUEUED",
+        )
+        state = MemoryDreamState(user_id=user.id, lease_owner=run.public_id)
+        db.add_all([run, state])
+        OutboxService.add_event(
+            db,
+            "memory.consolidate",
+            "user",
+            user.id,
+            {"riskLevel": None, "consolidationRunId": run.public_id},
+            f"memory.consolidate:{run.public_id}",
+        )
+        db.commit()
+        db.close()
+
+        OutboxPublisher(
+            self.Session,
+            FakeBroker(RuntimeError("broker unavailable"), max_attempts=1),
+        ).publish_batch(10)
+
+        db = self.Session()
+        loaded_run = db.query(MemoryConsolidationRun).one()
+        loaded_state = db.query(MemoryDreamState).one()
+        self.assertEqual(loaded_run.status, "FAILED")
+        self.assertEqual(loaded_state.lease_owner, "")
+        self.assertIsNone(loaded_state.lease_expires_at)
+        self.assertIn("投递失败", loaded_state.last_error)
+        db.close()
 
     def test_exhausted_knowledge_publish_marks_job_as_retryable_failure(self):
         db = self.Session()

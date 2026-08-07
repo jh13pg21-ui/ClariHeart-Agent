@@ -20,7 +20,7 @@ class PromptReleaseTests(unittest.TestCase):
 
         release = default_prompt_release()
 
-        self.assertEqual(PROMPT_RELEASE, "2026.08-v1")
+        self.assertEqual(PROMPT_RELEASE, "2026.08-v2")
         self.assertEqual(set(release.tasks), EXPECTED_TASKS)
         self.assertEqual(len(release.manifest_hash), 64)
 

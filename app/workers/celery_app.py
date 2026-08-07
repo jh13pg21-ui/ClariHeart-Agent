@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from celery import Celery
 from celery.schedules import crontab
 from kombu import Exchange, Queue
@@ -64,6 +66,10 @@ celery_app.conf.update(
             "queue": settings.celery_general_queue,
             "routing_key": settings.celery_general_queue,
         },
+        "app.workers.tasks.scan_memory_dreams": {
+            "queue": settings.celery_general_queue,
+            "routing_key": settings.celery_general_queue,
+        },
         "app.workers.tasks.purge_expired_private_data": {
             "queue": settings.celery_general_queue,
             "routing_key": settings.celery_general_queue,
@@ -78,6 +84,12 @@ celery_app.conf.update(
         },
     },
     beat_schedule={
+        "scan-memory-dreams": {
+            "task": "app.workers.tasks.scan_memory_dreams",
+            "schedule": timedelta(
+                minutes=max(1.0, settings.memory_consolidation_beat_interval_minutes)
+            ),
+        },
         "purge-expired-private-data-daily": {
             "task": "app.workers.tasks.purge_expired_private_data",
             "schedule": crontab(hour=3, minute=20),

@@ -153,10 +153,14 @@ class Settings(BaseSettings):
     long_term_memory_extract_min_new_messages: int = 6
     memory_v2_enabled: bool = True
     memory_v2_shadow_mode: bool = False
-    memory_consolidation_enabled: bool = False
+    memory_consolidation_enabled: bool = True
     memory_consolidation_min_interval_hours: float = 24.0
+    memory_consolidation_scan_interval_minutes: float = 60.0
     memory_consolidation_min_active_memories: int = 10
     memory_consolidation_min_modified_sessions: int = 5
+    memory_consolidation_lease_seconds: int = 3600
+    memory_consolidation_scan_batch_size: int = 100
+    memory_consolidation_beat_interval_minutes: float = 15.0
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""

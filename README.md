@@ -118,7 +118,7 @@ Prompt 文件位于 `app/prompts/`，由代码中的显式注册表管理，不�
 
 摘要调度使用单调 watermark 和事务预留，避免并发重复任务以及旧摘要覆盖新摘要。模型失败、JSON 非法、证据越界或隐私校验失败时，使用确定性摘要降级，不阻断学生端回复。
 
-### 长期记忆 V2
+### 长期记忆 V3
 
 长期记忆记录以下生产元数据：
 
@@ -131,17 +131,32 @@ Prompt 文件位于 `app/prompts/`，由代码中的显式注册表管理，不�
 - `ACTIVE / SUPERSEDED / EXPIRED` 状态；
 - supersedes 版本关系。
 
-相同事实会追加证据和确认次数；事实内容变化时创建新记录并将旧版本标记为 `SUPERSEDED`，不直接覆盖历史。注入模型上下文时采用相关性、置信度和时效性组合排序，只有真正进入最终 context plan 的记忆才记录使用次数。
+V3 进一步增加稳定语义槽位 `memory_key`、冲突组、合并来源谱系和仲裁原因，并支持 `CONFLICTED` 隔离状态。提取模型输出 `CREATE / CONFIRM / SUPERSEDE / CONFLICT / IGNORE` 建议，但服务端会对白名单动作、证据消息 ID、关联记忆 ID 和用户归属做确定性校验，模型不能凭空引用或直接修改数据库。
 
-### Memory Consolidation
+相同 `memory_key` 下，相同事实会追加证据和确认次数；明确变化会创建新版本并将旧版本标记为 `SUPERSEDED`；旧事实再次得到新证据时可恢复为最新版本。无法可靠判断替代关系的矛盾候选进入 `CONFLICTED` 隔离区，不参与正常检索和 Prompt 注入。注入模型上下文时采用相关性、置信度和时效性组合排序，只有真正进入最终 context plan 的记忆才记录使用次数。
 
-低频 Consolidator 通过 Outbox/Celery 异步执行，只允许 `KEEP / MERGE / SUPERSEDE / EXPIRE`，不物理删除记录。当前默认：
+### Memory Dream 与自动整理
+
+Dream 默认启用，由“记忆提取完成后检查”和 Celery Beat 周期扫描两个入口触发，但必须依次通过参考 Claude Code 的四层门控：
+
+1. 距上次成功 Dream 至少 24 小时；
+2. 距上次候选扫描至少 60 分钟；
+3. 上次 Dream 后至少有 5 个产生长期记忆变更的会话；
+4. 获取数据库租约；租约默认 1 小时，崩溃遗留租约可被后续扫描恢复。
+
+项目额外要求至少 10 条新增或更新的活跃记忆，避免小样本无意义调用模型。通过门控后先在同一数据库事务中预留运行记录和租约，再写入 Transactional Outbox，由 RabbitMQ/Celery 执行整合。Outbox 永久投递失败会立即释放租约；Worker 崩溃则由租约过期恢复。
+
+Dream 只允许 `KEEP / MERGE / SUPERSEDE / EXPIRE`。所有决策先整批校验，任一来源 ID、动作或合并内容非法时整轮零记忆变更。`MERGE` 会创建一条新的活跃记忆，保存证据并集、`consolidated_from_ids_json` 来源谱系和合并原因，再将所有来源标记为 `SUPERSEDED`；不会再把第一条来源假装成合并结果，也不会物理删除历史。
 
 ```env
-MEMORY_CONSOLIDATION_ENABLED=false
+MEMORY_CONSOLIDATION_ENABLED=true
+MEMORY_CONSOLIDATION_MIN_INTERVAL_HOURS=24
+MEMORY_CONSOLIDATION_SCAN_INTERVAL_MINUTES=60
+MEMORY_CONSOLIDATION_MIN_MODIFIED_SESSIONS=5
+MEMORY_CONSOLIDATION_MIN_ACTIVE_MEMORIES=10
+MEMORY_CONSOLIDATION_LEASE_SECONDS=3600
+MEMORY_CONSOLIDATION_BEAT_INTERVAL_MINUTES=15
 ```
-
-因此默认部署不会自动执行记忆整合。
 
 ## RAG 与文档摄取
 
@@ -262,7 +277,7 @@ Compose 当前包含：
 - `worker-general`：通用任务、摘要和长期记忆；
 - `worker-alert`：邮件预警队列；
 - `worker-ingestion`：单并发 RAG 摄取；
-- `worker-beat`：保留策略等周期任务；
+- `worker-beat`：Dream 扫描、保留策略等周期任务；
 - `outbox-publisher`：发布事务 Outbox。
 
 ### 3. 创建账号
@@ -345,7 +360,13 @@ CONTEXT_PLANNER_SHADOW_MODE=false
 
 MEMORY_COMPACTION_ENABLED=true
 LONG_TERM_MEMORY_ENABLED=true
-MEMORY_CONSOLIDATION_ENABLED=false
+MEMORY_CONSOLIDATION_ENABLED=true
+MEMORY_CONSOLIDATION_MIN_INTERVAL_HOURS=24
+MEMORY_CONSOLIDATION_SCAN_INTERVAL_MINUTES=60
+MEMORY_CONSOLIDATION_MIN_MODIFIED_SESSIONS=5
+MEMORY_CONSOLIDATION_MIN_ACTIVE_MEMORIES=10
+MEMORY_CONSOLIDATION_LEASE_SECONDS=3600
+MEMORY_CONSOLIDATION_BEAT_INTERVAL_MINUTES=15
 
 KNOWLEDGE_VECTOR_ENABLED=true
 KNOWLEDGE_VECTOR_REQUIRED=false
@@ -527,7 +548,7 @@ python -m app.mcp_tools.server
 
 - 系统是工程辅助工具，不提供临床诊断结论；风险评测指标也不代表临床有效性。
 - 本地 PDF、GGUF 权重、`.env`、密钥、数据库和运行产物不会提交到 Git。
-- Memory Consolidation 默认关闭，需要在受控环境评估后再启用。
+- Dream 的冲突识别和合并内容仍依赖模型判断，但所有 ID、动作、隐私边界和状态变更都由服务端校验；不确定冲突会隔离而非注入上下文。
 - RAG gold page labels 尚包含机器种子标注，必须人工复核后才能作为发布门槛。
 - Prompt Registry 能生成 release manifest 并校验显式传入的历史记录，但当前应用启动流程只检查认证配置与数据库迁移状态，没有自动比对一个独立的锁定 manifest 文件。
 - 离线故障 Harness 验证确定性恢复矩阵，不等价于真实网络、真实 Redis 集群或真实模型的容量测试。
@@ -538,7 +559,7 @@ python -m app.mcp_tools.server
 
 1. 如何把 Prompt 拼接升级为版本化、可信边界清晰且可审计的上下文系统；
 2. 如何依据模型窗口做确定性压缩，并限制 reactive recovery 的次数；
-3. 如何用证据、置信度、版本关系和异步整合控制长期记忆污染；
+3. 如何用稳定语义槽位、冲突隔离、证据谱系、四层 Dream 门控和可恢复租约控制长期记忆污染；
 4. 如何在 deadline、幂等、隐私出站策略和降级矩阵约束下恢复模型及基础设施故障。
 
 对应代码主要位于 `app/prompts/`、`app/context/`、`app/llm/`、`app/services/long_term_memory.py`、`app/services/memory_consolidation.py` 和 `app/context_eval/`。

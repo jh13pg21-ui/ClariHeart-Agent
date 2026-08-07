@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from app.prompts.registry import PromptRegistry, PromptReleaseEntry, default_prompt_registry
 
 
-PROMPT_RELEASE = "2026.08-v1"
+PROMPT_RELEASE = "2026.08-v2"
 
 
 @dataclass(frozen=True)

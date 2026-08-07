@@ -11,7 +11,7 @@ def test_production_defaults_enable_safe_runtime_layers():
     assert settings.memory_v2_enabled is True
     assert settings.context_planner_shadow_mode is False
     assert settings.memory_v2_shadow_mode is False
-    assert settings.memory_consolidation_enabled is False
+    assert settings.memory_consolidation_enabled is True
 
 
 def test_high_risk_cloud_egress_cannot_be_enabled_by_environment(monkeypatch):

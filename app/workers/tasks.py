@@ -20,6 +20,8 @@ from app.models.entities import (
     PsychologicalReport,
     RiskCase,
     MemoryConsolidationRun,
+    MemoryDreamState,
+    UserAccount,
     ToolJob,
 )
 from app.services.outbox import OutboxService
@@ -39,6 +41,61 @@ worker_settings = get_settings()
 
 class RetryableTaskError(RuntimeError):
     pass
+
+
+@celery_app.task(name="app.workers.tasks.scan_memory_dreams")
+def scan_memory_dreams() -> dict:
+    if not bool(getattr(worker_settings, "memory_consolidation_enabled", False)):
+        return {"status": "DISABLED", "scanned": 0, "scheduled": 0, "errors": 0}
+    db: Session = SessionLocal()
+    scanned = scheduled = errors = 0
+    try:
+        batch_size = max(
+            1,
+            int(getattr(worker_settings, "memory_consolidation_scan_batch_size", 100)),
+        )
+        # 优先扫描从未检查或最久未检查的用户，避免固定前 N 个用户造成饥饿。
+        user_ids = [
+            int(row[0])
+            for row in db.query(UserAccount.id)
+            .outerjoin(MemoryDreamState, MemoryDreamState.user_id == UserAccount.id)
+            .filter(UserAccount.long_term_memory_enabled.is_(True))
+            .order_by(MemoryDreamState.last_scanned_at.asc(), UserAccount.id.asc())
+            .limit(batch_size)
+            .all()
+        ]
+        for user_id in user_ids:
+            scanned += 1
+            try:
+                run = MemoryConsolidationService(
+                    db,
+                    worker_settings,
+                ).reserve_schedule(user_id, trigger_reason="periodic_scan")
+                if run is not None:
+                    OutboxService.add_event(
+                        db,
+                        "memory.consolidate",
+                        "user",
+                        user_id,
+                        {
+                            "riskLevel": None,
+                            "consolidationRunId": run.public_id,
+                        },
+                        f"memory.consolidate:{run.public_id}",
+                    )
+                    scheduled += 1
+                db.commit()
+            except Exception:
+                db.rollback()
+                errors += 1
+        return {
+            "status": "SUCCESS" if errors == 0 else "PARTIAL",
+            "scanned": scanned,
+            "scheduled": scheduled,
+            "errors": errors,
+        }
+    finally:
+        db.close()
 
 
 @celery_app.task(
