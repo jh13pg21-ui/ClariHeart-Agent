@@ -611,6 +611,18 @@ class ResponseAgent(BaseAutonomousAgent):
                 getattr(self.services.settings, "context_planner_shadow_mode", False)
             ):
                 messages = list(assembled_prompt.messages)
+            if any(section.id == "memory.long_term" for section in context_plan.sections):
+                try:
+                    self.services.long_term_memory.mark_used_ids(
+                        self.services.user.id,
+                        [
+                            item.get("id")
+                            for item in context_payload.get("longTermMemories", [])
+                            if isinstance(item, dict)
+                        ],
+                    )
+                except Exception:
+                    pass
         started = time.perf_counter()
         generation_status = "generated"
         failure_code = ""

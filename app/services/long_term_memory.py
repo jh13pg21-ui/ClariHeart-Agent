@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Iterable, Sequence
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -15,6 +16,7 @@ from app.schemas.dtos import LongTermMemoryResponse, MemoryCandidate
 from app.services.ai import AiClient
 from app.services.privacy import PrivacySanitizer
 from app.services.data_protection import SensitiveTextProtector
+from app.services.memory_ranking import MemoryRanker
 from app.prompts.runtime import registered_complete
 
 
@@ -119,11 +121,16 @@ class LongTermMemoryService:
 
     def list_for_user(self, user_id: int) -> list[LongTermMemory]:
         limit = max(1, int(getattr(self.settings, "long_term_memory_max_items", 200)))
+        current = datetime.utcnow()
         return (
             self.db.query(LongTermMemory)
             .filter(
                 LongTermMemory.user_id == user_id,
                 LongTermMemory.status == "ACTIVE",
+                or_(
+                    LongTermMemory.expires_at.is_(None),
+                    LongTermMemory.expires_at > current,
+                ),
             )
             .order_by(LongTermMemory.updated_at.desc(), LongTermMemory.id.desc())
             .limit(limit)
@@ -162,14 +169,37 @@ class LongTermMemoryService:
                 or getattr(self.settings, "long_term_memory_relevant_items", 5)
             ),
         )
-        selected = await self._select_with_model(items, query, selected_limit)
-        if not selected:
-            selected = self._select_by_keywords(items, query, selected_limit)
-        now = datetime.utcnow()
-        for item in selected:
-            item.last_accessed_at = now
+        semantic = await self._select_with_model(items, query, selected_limit)
+        semantic_ids = {item.public_id for item in semantic}
+        ranked = MemoryRanker(self.protector.reveal).rank(
+            items,
+            query,
+            now=datetime.utcnow(),
+            semantic_ids=semantic_ids,
+        )
+        return [item.memory for item in ranked if item.relevance > 0][:selected_limit]
+
+    def mark_used(self, items: Iterable[LongTermMemory]) -> None:
+        current = datetime.utcnow()
+        for item in items:
+            item.usage_count = int(item.usage_count or 0) + 1
+            item.last_accessed_at = current
             self.db.add(item)
-        return selected
+
+    def mark_used_ids(self, user_id: int, public_ids: Iterable[str]) -> None:
+        ids = tuple(dict.fromkeys(str(value) for value in public_ids if value))
+        if not ids:
+            return
+        items = (
+            self.db.query(LongTermMemory)
+            .filter(
+                LongTermMemory.user_id == user_id,
+                LongTermMemory.public_id.in_(ids),
+                LongTermMemory.status == "ACTIVE",
+            )
+            .all()
+        )
+        self.mark_used(items)
 
     def upsert(
         self,

@@ -41,7 +41,15 @@ class EmptyPrivateMemory:
         return None
 
 
-def _services(client, *, window=1000):
+class UsageTracker:
+    def __init__(self):
+        self.calls = []
+
+    def mark_used_ids(self, user_id, public_ids):
+        self.calls.append((user_id, list(public_ids)))
+
+
+def _services(client, *, window=1000, usage_tracker=None):
     profile = SimpleNamespace(provider="mock", model="tiny-model", max_tokens=100)
     settings = SimpleNamespace(
         prompt_registry_enabled=True,
@@ -56,7 +64,7 @@ def _services(client, *, window=1000):
     )
     return SimpleNamespace(
         settings=settings,
-        user=SimpleNamespace(display_name="同学"),
+        user=SimpleNamespace(id=7, display_name="同学"),
         session=SimpleNamespace(public_id="session"),
         private_memory=EmptyPrivateMemory(),
         model_registry=SimpleNamespace(
@@ -64,6 +72,7 @@ def _services(client, *, window=1000):
             profile_for=lambda name: profile,
         ),
         response_token_sink=None,
+        long_term_memory=usage_tracker or UsageTracker(),
     )
 
 
@@ -106,6 +115,15 @@ def _board(risk: RiskLevel, *, injection: str = "", reactive: bool = False):
                     "modelHistory": [*history, AiMessage(role="user", content="当前问题")],
                     "memoryBrief": (injection or "历史摘要") * 80,
                     "longTermMemoryContext": "长期背景" * 80,
+                    "longTermMemories": [
+                        {
+                            "id": "memory-1",
+                            "type": "CONTEXT",
+                            "name": "秋招",
+                            "description": "后端面试",
+                            "body": "长期背景",
+                        }
+                    ],
                     "retrievedKnowledge": [],
                     "skillContext": "支持技能" * 40,
                 },
@@ -187,3 +205,16 @@ class AgentContextPlanningTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(raised.exception.code, ModelErrorCode.PROMPT_TOO_LONG)
+
+    async def test_usage_is_recorded_only_when_memory_section_enters_plan(self):
+        tracker = UsageTracker()
+        agent = ResponseAgent(
+            _services(CapturingClient(), window=4000, usage_tracker=tracker)
+        )
+
+        await agent.act(
+            AgentTask(id="response-memory", title="response"),
+            _board(RiskLevel.MEDIUM),
+        )
+
+        self.assertEqual(tracker.calls, [(7, ["memory-1"])])
