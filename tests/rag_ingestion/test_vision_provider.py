@@ -51,6 +51,21 @@ def test_vision_payload_uses_original_detail_and_locally_validates_schema(tmp_pa
     assert "Allowed block type values exactly:" in prompt
     assert "document_identifier" not in prompt
     assert '"blocks": []' in prompt
+    assert_strict_object_schema(payloads[0]["response_format"]["json_schema"]["schema"])
+
+
+def assert_strict_object_schema(node):
+    if isinstance(node, dict):
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            assert node.get("required") == list(properties)
+            assert node.get("additionalProperties") is False
+        assert "default" not in node
+        for value in node.values():
+            assert_strict_object_schema(value)
+    elif isinstance(node, list):
+        for value in node:
+            assert_strict_object_schema(value)
 
 
 def test_translated_schema_keys_retry_once_then_fail(tmp_path):

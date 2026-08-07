@@ -126,10 +126,27 @@ class OpenAICompatibleVisionProvider:
                 "json_schema": {
                     "name": "vision_page_result",
                     "strict": True,
-                    "schema": VisionPageResult.model_json_schema(),
+                    "schema": self._strict_schema(VisionPageResult.model_json_schema()),
                 },
             },
         }
+
+    @classmethod
+    def _strict_schema(cls, node):
+        if isinstance(node, list):
+            return [cls._strict_schema(value) for value in node]
+        if not isinstance(node, dict):
+            return node
+        result = {
+            key: cls._strict_schema(value)
+            for key, value in node.items()
+            if key != "default"
+        }
+        properties = result.get("properties")
+        if isinstance(properties, dict):
+            result["required"] = list(properties)
+            result["additionalProperties"] = False
+        return result
 
     @staticmethod
     def _content(body: dict) -> str:
