@@ -28,6 +28,7 @@ MEMORY_TYPES = {
     "GOAL",
     "CONSTRAINT",
 }
+MEMORY_ACTIONS = {"CREATE", "CONFIRM", "SUPERSEDE", "CONFLICT", "IGNORE"}
 STABLE_MEMORY_SIGNALS = (
     "叫我",
     "称呼我",
@@ -145,8 +146,10 @@ class LongTermMemoryService:
             {
                 "id": item.public_id,
                 "type": item.memory_type,
+                "memoryKey": item.memory_key,
                 "name": item.name,
                 "description": item.description,
+                "status": item.status,
             }
             for item in self.list_for_user(user_id)
         ]
@@ -255,6 +258,28 @@ class LongTermMemoryService:
         ):
             return None
         normalized_type, safe_name, safe_description, safe_body = normalized
+        action = str(candidate.action or "CREATE").strip().upper()
+        if action not in MEMORY_ACTIONS:
+            return None
+        if action == "IGNORE":
+            return None
+        related_ids = tuple(
+            dict.fromkeys(
+                str(value).strip()
+                for value in candidate.related_memory_ids
+                if str(value).strip()
+            )
+        )
+        related = self._related_memories(user_id, related_ids)
+        if len(related) != len(related_ids):
+            return None
+        memory_key = self._canonical_memory_key(
+            normalized_type,
+            safe_name,
+            candidate.memory_key,
+        )
+        if related and not str(candidate.memory_key or "").strip():
+            memory_key = related[0].memory_key or memory_key
         content_hash = hashlib.sha256(
             f"{normalized_type}\n{safe_body}".encode("utf-8")
         ).hexdigest()
@@ -280,25 +305,85 @@ class LongTermMemoryService:
                 self._bounded_confidence(candidate.confidence),
             )
             exact.updated_at = now
+            exact.memory_key = exact.memory_key or memory_key
+            exact.resolution_reason = self.privacy.sanitize(str(candidate.reason or ""))[:1000]
+            if exact.status != "ACTIVE" and action != "CONFLICT":
+                active_slot = self._active_slot(user_id, memory_key, exclude_id=exact.id)
+                latest_version = max(
+                    [int(exact.version or 1), *(int(item.version or 1) for item in active_slot)]
+                )
+                for item in active_slot:
+                    item.status = "SUPERSEDED"
+                    item.updated_at = now
+                    self.db.add(item)
+                exact.status = "ACTIVE"
+                exact.version = latest_version + 1
+                exact.supersedes_memory_id = active_slot[0].id if active_slot else None
+                exact.conflict_group_id = None
             self.db.add(exact)
             return exact
 
-        previous = (
-            self.db.query(LongTermMemory)
+        if action == "CONFIRM":
+            target = next((item for item in related if item.status == "ACTIVE"), None)
+            if target is None:
+                return None
+            target.evidence_message_ids_json = json.dumps(
+                list(dict.fromkeys((*self._evidence_ids(target), *evidence_ids))),
+                separators=(",", ":"),
+            )
+            target.confirmation_count = int(target.confirmation_count or 0) + 1
+            target.last_confirmed_at = now
+            target.confidence = max(
+                float(target.confidence or 0.0),
+                self._bounded_confidence(candidate.confidence),
+            )
+            target.resolution_reason = self.privacy.sanitize(str(candidate.reason or ""))[:1000]
+            target.updated_at = now
+            self.db.add(target)
+            return target
+
+        previous_rows = self._active_slot(user_id, memory_key)
+        if action == "SUPERSEDE":
+            by_id = {item.id: item for item in previous_rows}
+            for item in related:
+                if item.status == "ACTIVE":
+                    by_id[item.id] = item
+            previous_rows = sorted(
+                by_id.values(),
+                key=lambda item: (int(item.version or 1), item.id),
+                reverse=True,
+            )
+        previous = previous_rows[0] if previous_rows else None
+        if action == "CONFLICT":
+            previous = None
+        all_versions = (
+            self.db.query(LongTermMemory.version)
             .filter(
                 LongTermMemory.user_id == user_id,
-                LongTermMemory.memory_type == normalized_type,
-                LongTermMemory.name == safe_name,
-                LongTermMemory.status == "ACTIVE",
+                LongTermMemory.memory_key == memory_key,
             )
-            .order_by(LongTermMemory.version.desc(), LongTermMemory.id.desc())
-            .first()
+            .all()
         )
-        version = int(previous.version or 1) + 1 if previous is not None else 1
-        if previous is not None:
-            previous.status = "SUPERSEDED"
-            previous.updated_at = now
-            self.db.add(previous)
+        latest_version = max((int(row[0] or 1) for row in all_versions), default=0)
+        version = latest_version + 1
+        if action != "CONFLICT":
+            for item in previous_rows:
+                item.status = "SUPERSEDED"
+                item.updated_at = now
+                self.db.add(item)
+
+        conflict_group_id = None
+        status = "ACTIVE"
+        if action == "CONFLICT":
+            status = "CONFLICTED"
+            conflict_group_id = next(
+                (item.conflict_group_id for item in related if item.conflict_group_id),
+                uuid.uuid4().hex,
+            )
+            for item in related:
+                item.conflict_group_id = conflict_group_id
+                item.updated_at = now
+                self.db.add(item)
         memory = LongTermMemory(
             public_id=uuid.uuid4().hex,
             user_id=user_id,
@@ -308,17 +393,21 @@ class LongTermMemoryService:
             description=safe_description,
             body=self.protector.protect(safe_body),
             content_hash=content_hash,
-            status="ACTIVE",
+            status=status,
             evidence_message_ids_json=json.dumps(list(evidence_ids), separators=(",", ":")),
             confidence=self._bounded_confidence(candidate.confidence),
             extraction_method=str(candidate.extraction_method or "model")[:32],
-            prompt_version=str(candidate.prompt_version or "memory_candidate_v2")[:64],
+            prompt_version=str(candidate.prompt_version or "memory_candidate_v3")[:64],
             model_provider=str(candidate.model_provider or "")[:32],
             model_name=str(candidate.model_name or "")[:128],
             version=version,
             usage_count=0,
             confirmation_count=0,
             supersedes_memory_id=previous.id if previous is not None else None,
+            memory_key=memory_key,
+            conflict_group_id=conflict_group_id,
+            consolidated_from_ids_json="[]",
+            resolution_reason=self.privacy.sanitize(str(candidate.reason or ""))[:1000],
         )
         self.db.add(memory)
         self.db.flush()
@@ -401,10 +490,8 @@ class LongTermMemoryService:
             }
             for message_id, role, content in normalized_messages
         ]
-        existing_index = json.dumps(
-            self.index_for_user(user_id),
-            ensure_ascii=False,
-        )
+        memory_index = self.index_for_user(user_id)
+        existing_index = json.dumps(memory_index, ensure_ascii=False)
         candidates: list[MemoryCandidate] = []
         try:
             raw = await registered_complete(
@@ -423,6 +510,7 @@ class LongTermMemoryService:
                 allowed_user_ids,
                 provider,
                 model,
+                {item["id"] for item in memory_index},
             )
         except Exception:
             candidates = []
@@ -600,6 +688,7 @@ class LongTermMemoryService:
         allowed_user_ids: set[int],
         provider: str,
         model: str,
+        allowed_memory_ids: set[str] | None = None,
     ) -> list[MemoryCandidate]:
         try:
             data = json.loads(LongTermMemoryService._strip_code_fence(raw))
@@ -623,6 +712,19 @@ class LongTermMemoryService:
             )
             if not evidence:
                 continue
+            raw_related = item.get("relatedMemoryIds", [])
+            if not isinstance(raw_related, list) or any(
+                not isinstance(value, str) for value in raw_related
+            ):
+                continue
+            related = tuple(dict.fromkeys(value.strip() for value in raw_related if value.strip()))
+            if allowed_memory_ids is not None and any(
+                value not in allowed_memory_ids for value in related
+            ):
+                continue
+            action = str(item.get("action", "CREATE")).strip().upper()
+            if action not in MEMORY_ACTIONS:
+                continue
             result.append(
                 MemoryCandidate(
                     memory_type=str(item.get("type", "")),
@@ -633,13 +735,59 @@ class LongTermMemoryService:
                     confidence=LongTermMemoryService._bounded_confidence(
                         item.get("confidence", 0.5)
                     ),
+                    memory_key=str(item.get("memoryKey", "")),
+                    action=action,
+                    related_memory_ids=related,
+                    reason=str(item.get("reason", "")),
                     extraction_method="model",
-                    prompt_version="memory_candidate_v2",
+                    prompt_version="memory_candidate_v3",
                     model_provider=provider,
                     model_name=model,
                 )
             )
         return result
+
+    def _related_memories(
+        self,
+        user_id: int,
+        public_ids: tuple[str, ...],
+    ) -> list[LongTermMemory]:
+        if not public_ids:
+            return []
+        rows = (
+            self.db.query(LongTermMemory)
+            .filter(
+                LongTermMemory.user_id == user_id,
+                LongTermMemory.public_id.in_(public_ids),
+                LongTermMemory.status.in_(("ACTIVE", "CONFLICTED")),
+            )
+            .all()
+        )
+        by_public_id = {item.public_id: item for item in rows}
+        return [by_public_id[value] for value in public_ids if value in by_public_id]
+
+    def _active_slot(
+        self,
+        user_id: int,
+        memory_key: str,
+        exclude_id: int | None = None,
+    ) -> list[LongTermMemory]:
+        query = self.db.query(LongTermMemory).filter(
+            LongTermMemory.user_id == user_id,
+            LongTermMemory.memory_key == memory_key,
+            LongTermMemory.status == "ACTIVE",
+        )
+        if exclude_id is not None:
+            query = query.filter(LongTermMemory.id != exclude_id)
+        return query.order_by(LongTermMemory.version.desc(), LongTermMemory.id.desc()).all()
+
+    @staticmethod
+    def _canonical_memory_key(memory_type: str, name: str, provided: str = "") -> str:
+        source = str(provided or "").strip().lower()
+        if not source:
+            source = f"{str(memory_type or '').strip().lower()}.{str(name or '').strip().lower()}"
+        normalized = re.sub(r"[^\w]+", ".", source, flags=re.UNICODE).strip(".")
+        return normalized[:191] or f"{str(memory_type or 'memory').lower()}.unnamed"
 
     def _valid_user_evidence(
         self,

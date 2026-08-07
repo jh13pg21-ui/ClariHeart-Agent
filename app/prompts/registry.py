@@ -207,7 +207,7 @@ TASK_PROMPT_DEFINITIONS = (
     PromptDefinition("task.response_generation", "1.0.0", "tasks/response_generation.md"),
     PromptDefinition("task.query_rewrite", "1.0.0", "tasks/query_rewrite.md"),
     PromptDefinition("task.conversation_summary", "2.0.0", "tasks/conversation_summary.md", output_schema_id="conversation_summary_v2"),
-    PromptDefinition("task.memory_extraction", "2.0.0", "tasks/memory_extraction.md", output_schema_id="memory_candidate_v2"),
+    PromptDefinition("task.memory_extraction", "3.0.0", "tasks/memory_extraction.md", output_schema_id="memory_candidate_v3"),
     PromptDefinition("task.memory_selection", "1.0.0", "tasks/memory_selection.md"),
     PromptDefinition("task.memory_consolidation", "1.0.0", "tasks/memory_consolidation.md"),
     PromptDefinition("task.context_section_summary", "1.0.0", "tasks/context_section_summary.md", output_schema_id="context_section_summary_v1"),
@@ -218,6 +218,7 @@ SCHEMA_DEFINITIONS = (
     SchemaDefinition("risk_v1", "schemas/risk_v1.json"),
     SchemaDefinition("conversation_summary_v2", "schemas/conversation_summary_v2.json"),
     SchemaDefinition("memory_candidate_v2", "schemas/memory_candidate_v2.json"),
+    SchemaDefinition("memory_candidate_v3", "schemas/memory_candidate_v3.json"),
     SchemaDefinition("context_section_summary_v1", "schemas/context_section_summary_v1.json"),
 )
 

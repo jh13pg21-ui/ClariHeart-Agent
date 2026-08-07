@@ -131,7 +131,7 @@ class LongTermMemoryV2Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(stored), 1)
         memory = stored[0]
         self.assertEqual(json.loads(memory.evidence_message_ids_json), [self.user_message.id])
-        self.assertEqual(memory.prompt_version, "memory_candidate_v2")
+        self.assertEqual(memory.prompt_version, "memory_candidate_v3")
         self.assertEqual(memory.model_provider, "ollama")
         self.assertEqual(memory.model_name, "memory-model")
         self.assertEqual(memory.extraction_method, "model")

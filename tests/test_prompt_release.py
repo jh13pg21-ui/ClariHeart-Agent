@@ -56,7 +56,7 @@ class PromptReleaseTests(unittest.TestCase):
         registry = default_prompt_registry()
         summary = registry.output_schema("conversation_summary_v2")
         item = summary["$defs"]["summaryItem"]
-        candidate = registry.output_schema("memory_candidate_v2")
+        candidate = registry.output_schema("memory_candidate_v3")
 
         self.assertIn("evidenceMessageIds", item["required"])
         self.assertLessEqual(summary["properties"]["studentConcerns"]["maxItems"], 12)

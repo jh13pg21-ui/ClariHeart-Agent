@@ -97,8 +97,12 @@ class MemoryCandidate:
     body: str
     evidence_message_ids: tuple[int, ...]
     confidence: float = 0.5
+    memory_key: str = ""
+    action: str = "CREATE"
+    related_memory_ids: tuple[str, ...] = ()
+    reason: str = ""
     extraction_method: str = "model"
-    prompt_version: str = "memory_candidate_v2"
+    prompt_version: str = "memory_candidate_v3"
     model_provider: str = ""
     model_name: str = ""
 

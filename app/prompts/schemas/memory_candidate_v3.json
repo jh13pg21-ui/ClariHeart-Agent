@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "memory_candidate_v3",
+  "type": "array",
+  "maxItems": 12,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "type",
+      "memoryKey",
+      "name",
+      "description",
+      "body",
+      "evidenceMessageIds",
+      "action",
+      "relatedMemoryIds",
+      "reason"
+    ],
+    "properties": {
+      "type": {"type": "string", "enum": ["PROFILE", "PREFERENCE", "GOAL", "CONSTRAINT", "SUPPORT", "CONTEXT"]},
+      "memoryKey": {"type": "string", "minLength": 1, "maxLength": 191, "pattern": "^[A-Za-z0-9_.-]+$"},
+      "name": {"type": "string", "minLength": 1, "maxLength": 120},
+      "description": {"type": "string", "maxLength": 300},
+      "body": {"type": "string", "minLength": 1, "maxLength": 1200},
+      "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+      "evidenceMessageIds": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+      "action": {"type": "string", "enum": ["CREATE", "CONFIRM", "SUPERSEDE", "CONFLICT", "IGNORE"]},
+      "relatedMemoryIds": {"type": "array", "maxItems": 20, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 64}},
+      "reason": {"type": "string", "maxLength": 1000}
+    }
+  }
+}
