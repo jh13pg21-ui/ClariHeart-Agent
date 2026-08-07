@@ -3,6 +3,7 @@
 from app.llm.capabilities import ModelCapabilities, ModelCapabilitiesRegistry
 from app.llm.contracts import ModelRequest, ModelResult, ModelStreamEvent
 from app.llm.errors import ModelError, ModelErrorCode
+from app.llm.gateway import ModelGateway
 from app.llm.egress import CloudEgressDecision, CloudEgressPolicy
 from app.llm.providers import ModelProvider, OllamaProvider, OpenAICompatibleProvider
 from app.llm.recovery import (
@@ -20,6 +21,7 @@ __all__ = [
     "ModelStreamEvent",
     "ModelError",
     "ModelErrorCode",
+    "ModelGateway",
     "CloudEgressDecision",
     "CloudEgressPolicy",
     "ModelProvider",

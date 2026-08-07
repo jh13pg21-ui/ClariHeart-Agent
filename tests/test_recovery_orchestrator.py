@@ -73,6 +73,21 @@ class ManualClock:
 
 
 class RecoveryOrchestratorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_expired_shared_deadline_does_not_start_provider_call(self):
+        from app.llm.recovery import RecoveryOrchestrator
+
+        provider = SequenceProvider([_result()])
+        clock = ManualClock(value=5.0)
+
+        with self.assertRaises(ModelError) as raised:
+            await RecoveryOrchestrator(provider, clock=clock).complete(
+                _request(),
+                deadline_at=5.0,
+            )
+
+        self.assertEqual(raised.exception.code, ModelErrorCode.TIMEOUT)
+        self.assertEqual(provider.calls, 0)
+
     async def test_retry_after_wins_over_exponential_delay(self):
         from app.llm.recovery import RecoveryOrchestrator, RecoveryPolicy
 

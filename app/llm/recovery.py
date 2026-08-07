@@ -100,15 +100,33 @@ class RecoveryOrchestrator:
     def last_state(self) -> RecoveryState:
         return self._state.get() or RecoveryState()
 
-    async def complete(self, request: ModelRequest) -> ModelResult:
+    async def complete(
+        self,
+        request: ModelRequest,
+        *,
+        deadline_at: float | None = None,
+    ) -> ModelResult:
         state = RecoveryState()
         self._state.set(state)
-        deadline = self._clock() + self.policy.deadline_seconds
+        deadline = (
+            deadline_at
+            if deadline_at is not None
+            else self._clock() + self.policy.deadline_seconds
+        )
         last_error: ModelError | None = None
 
         while True:
-            if self._clock() >= deadline and last_error is not None:
-                raise last_error
+            if self._clock() >= deadline:
+                if last_error is not None:
+                    raise last_error
+                raise ModelError(
+                    code=ModelErrorCode.TIMEOUT,
+                    message="模型调用 deadline 已耗尽",
+                    retryable=True,
+                    provider=request.preferred_provider,
+                    model=request.preferred_model,
+                    attempt=state.attempt,
+                )
             state.attempt += 1
             try:
                 result = await self.provider.complete(request)
