@@ -11,14 +11,21 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.models.entities import ChatMessage, ChatSession, LongTermMemory, UserAccount
-from app.schemas.dtos import LongTermMemoryResponse
+from app.schemas.dtos import LongTermMemoryResponse, MemoryCandidate
 from app.services.ai import AiClient
 from app.services.privacy import PrivacySanitizer
 from app.services.data_protection import SensitiveTextProtector
 from app.prompts.runtime import registered_complete
 
 
-MEMORY_TYPES = {"PROFILE", "PREFERENCE", "SUPPORT", "CONTEXT"}
+MEMORY_TYPES = {
+    "PROFILE",
+    "PREFERENCE",
+    "SUPPORT",
+    "CONTEXT",
+    "GOAL",
+    "CONSTRAINT",
+}
 STABLE_MEMORY_SIGNALS = (
     "叫我",
     "称呼我",
@@ -114,7 +121,10 @@ class LongTermMemoryService:
         limit = max(1, int(getattr(self.settings, "long_term_memory_max_items", 200)))
         return (
             self.db.query(LongTermMemory)
-            .filter(LongTermMemory.user_id == user_id)
+            .filter(
+                LongTermMemory.user_id == user_id,
+                LongTermMemory.status == "ACTIVE",
+            )
             .order_by(LongTermMemory.updated_at.desc(), LongTermMemory.id.desc())
             .limit(limit)
             .all()
@@ -170,21 +180,56 @@ class LongTermMemoryService:
         description: str,
         body: str,
     ) -> LongTermMemory | None:
+        return self.upsert_candidate(
+            user_id,
+            source_session_id,
+            MemoryCandidate(
+                memory_type=memory_type,
+                name=name,
+                description=description,
+                body=body,
+                evidence_message_ids=(),
+                confidence=0.5,
+                extraction_method="legacy",
+                prompt_version="legacy",
+            ),
+        )
+
+    def upsert_candidate(
+        self,
+        user_id: int,
+        source_session_id: int | None,
+        candidate: MemoryCandidate,
+    ) -> LongTermMemory | None:
         if not self._user_enabled(user_id):
             return None
         normalized = self._validate_candidate(
-            memory_type,
-            name,
-            description,
-            body,
+            candidate.memory_type,
+            candidate.name,
+            candidate.description,
+            candidate.body,
         )
         if normalized is None:
+            return None
+        evidence_ids = tuple(
+            dict.fromkeys(
+                int(value)
+                for value in candidate.evidence_message_ids
+                if int(value) > 0
+            )
+        )
+        if candidate.extraction_method != "legacy" and not self._valid_user_evidence(
+            user_id,
+            source_session_id,
+            evidence_ids,
+        ):
             return None
         normalized_type, safe_name, safe_description, safe_body = normalized
         content_hash = hashlib.sha256(
             f"{normalized_type}\n{safe_body}".encode("utf-8")
         ).hexdigest()
-        existing = (
+        now = datetime.utcnow()
+        exact = (
             self.db.query(LongTermMemory)
             .filter(
                 LongTermMemory.user_id == user_id,
@@ -192,24 +237,38 @@ class LongTermMemoryService:
             )
             .first()
         )
-        if existing is None:
-            existing = (
-                self.db.query(LongTermMemory)
-                .filter(
-                    LongTermMemory.user_id == user_id,
-                    LongTermMemory.memory_type == normalized_type,
-                    LongTermMemory.name == safe_name,
-                )
-                .first()
+        if exact is not None:
+            existing_evidence = self._evidence_ids(exact)
+            exact.evidence_message_ids_json = json.dumps(
+                list(dict.fromkeys((*existing_evidence, *evidence_ids))),
+                separators=(",", ":"),
             )
-        if existing is not None:
-            existing.source_session_id = source_session_id or existing.source_session_id
-            existing.description = safe_description
-            existing.body = self.protector.protect(safe_body)
-            existing.content_hash = content_hash
-            existing.updated_at = datetime.utcnow()
-            self.db.add(existing)
-            return existing
+            exact.confirmation_count = int(exact.confirmation_count or 0) + 1
+            exact.last_confirmed_at = now
+            exact.confidence = max(
+                float(exact.confidence or 0.0),
+                self._bounded_confidence(candidate.confidence),
+            )
+            exact.updated_at = now
+            self.db.add(exact)
+            return exact
+
+        previous = (
+            self.db.query(LongTermMemory)
+            .filter(
+                LongTermMemory.user_id == user_id,
+                LongTermMemory.memory_type == normalized_type,
+                LongTermMemory.name == safe_name,
+                LongTermMemory.status == "ACTIVE",
+            )
+            .order_by(LongTermMemory.version.desc(), LongTermMemory.id.desc())
+            .first()
+        )
+        version = int(previous.version or 1) + 1 if previous is not None else 1
+        if previous is not None:
+            previous.status = "SUPERSEDED"
+            previous.updated_at = now
+            self.db.add(previous)
         memory = LongTermMemory(
             public_id=uuid.uuid4().hex,
             user_id=user_id,
@@ -219,6 +278,17 @@ class LongTermMemoryService:
             description=safe_description,
             body=self.protector.protect(safe_body),
             content_hash=content_hash,
+            status="ACTIVE",
+            evidence_message_ids_json=json.dumps(list(evidence_ids), separators=(",", ":")),
+            confidence=self._bounded_confidence(candidate.confidence),
+            extraction_method=str(candidate.extraction_method or "model")[:32],
+            prompt_version=str(candidate.prompt_version or "memory_candidate_v2")[:64],
+            model_provider=str(candidate.model_provider or "")[:32],
+            model_name=str(candidate.model_name or "")[:128],
+            version=version,
+            usage_count=0,
+            confirmation_count=0,
+            supersedes_memory_id=previous.id if previous is not None else None,
         )
         self.db.add(memory)
         self.db.flush()
@@ -269,7 +339,10 @@ class LongTermMemoryService:
             .limit(limit)
             .all()
         )
-        messages = [(row.role, self.protector.reveal(row.content)) for row in reversed(rows)]
+        messages = [
+            (row.id, row.role, self.protector.reveal(row.content))
+            for row in reversed(rows)
+        ]
         return await self.extract_from_messages(
             assistant.user_id,
             assistant.session_id,
@@ -280,19 +353,29 @@ class LongTermMemoryService:
         self,
         user_id: int,
         source_session_id: int | None,
-        messages: Sequence[tuple[str, str]],
+        messages: Sequence[tuple[int, str, str] | tuple[str, str]],
     ) -> list[LongTermMemory]:
         if not getattr(self.settings, "long_term_memory_enabled", True) or not self._user_enabled(user_id):
             return []
-        dialogue = "\n".join(
-            f"{role.upper()}: {self.privacy.sanitize(content)}"
-            for role, content in messages[-10:]
-        )
+        normalized_messages = self._normalize_source_messages(messages[-10:])
+        allowed_user_ids = {
+            message_id
+            for message_id, role, _ in normalized_messages
+            if message_id > 0 and role.upper() == "USER"
+        }
+        dialogue = [
+            {
+                "id": message_id,
+                "role": role.upper(),
+                "content": self.privacy.sanitize(content),
+            }
+            for message_id, role, content in normalized_messages
+        ]
         existing_index = json.dumps(
             self.index_for_user(user_id),
             ensure_ascii=False,
         )
-        candidates: list[dict[str, str]] = []
+        candidates: list[MemoryCandidate] = []
         try:
             raw = await registered_complete(
                 self.ai,
@@ -304,21 +387,24 @@ class LongTermMemoryService:
                     "recentDialogue": dialogue,
                 },
             )
-            candidates = self._parse_candidates(raw)
+            provider, model = self._model_identity()
+            candidates = self._parse_candidates(
+                raw,
+                allowed_user_ids,
+                provider,
+                model,
+            )
         except Exception:
             candidates = []
         if not candidates:
-            candidates = self._deterministic_candidates(messages)
+            candidates = self._deterministic_candidates(normalized_messages)
 
         stored: list[LongTermMemory] = []
         for candidate in candidates[:5]:
-            memory = self.upsert(
+            memory = self.upsert_candidate(
                 user_id,
                 source_session_id,
-                candidate.get("type", ""),
-                candidate.get("name", ""),
-                candidate.get("description", ""),
-                candidate.get("body", ""),
+                candidate,
             )
             if memory is not None:
                 stored.append(memory)
@@ -340,6 +426,9 @@ class LongTermMemoryService:
             body=self.protector.reveal(item.body),
             createdAt=item.created_at,
             updatedAt=item.updated_at,
+            status=item.status,
+            confidence=float(item.confidence or 0.0),
+            version=int(item.version or 1),
         )
 
     async def _select_with_model(
@@ -422,59 +511,159 @@ class LongTermMemoryService:
 
     def _deterministic_candidates(
         self,
-        messages: Sequence[tuple[str, str]],
-    ) -> list[dict[str, str]]:
-        candidates: list[dict[str, str]] = []
-        for role, content in messages:
-            if role.upper() != "USER":
+        messages: Sequence[tuple[int, str, str]],
+    ) -> list[MemoryCandidate]:
+        candidates: list[MemoryCandidate] = []
+        for message_id, role, content in messages:
+            if role.upper() != "USER" or message_id <= 0:
                 continue
             text = content.strip()
             match = re.search(r"(?:请)?记住[，,:：\s]*(.+)", text)
             if match:
                 body = match.group(1).strip("。！! ")
                 candidates.append(
-                    {
-                        "type": "CONTEXT",
-                        "name": "学生明确要求记住",
-                        "description": body[:80],
-                        "body": body,
-                    }
+                    MemoryCandidate(
+                        "CONTEXT",
+                        "学生明确要求记住",
+                        body[:80],
+                        body,
+                        (message_id,),
+                        0.75,
+                        extraction_method="deterministic",
+                    )
                 )
                 continue
             match = re.search(r"以后(?:请)?(?:叫我|称呼我)[，,:：\s]*(.+)", text)
             if match:
                 name = match.group(1).strip("。！! ")
                 candidates.append(
-                    {
-                        "type": "PROFILE",
-                        "name": "称呼偏好",
-                        "description": f"学生希望被称为{name}",
-                        "body": f"学生希望以后被称为{name}。",
-                    }
+                    MemoryCandidate(
+                        "PROFILE",
+                        "称呼偏好",
+                        f"学生希望被称为{name}",
+                        f"学生希望以后被称为{name}。",
+                        (message_id,),
+                        0.9,
+                        extraction_method="deterministic",
+                    )
                 )
                 continue
             match = re.search(r"我(?:更)?喜欢[，,:：\s]*(.+)", text)
             if match:
                 preference = match.group(1).strip("。！! ")
                 candidates.append(
-                    {
-                        "type": "PREFERENCE",
-                        "name": "学生偏好",
-                        "description": preference[:80],
-                        "body": f"学生喜欢{preference}。",
-                    }
+                    MemoryCandidate(
+                        "PREFERENCE",
+                        "学生偏好",
+                        preference[:80],
+                        f"学生喜欢{preference}。",
+                        (message_id,),
+                        0.8,
+                        extraction_method="deterministic",
+                    )
                 )
         return candidates
 
     @staticmethod
-    def _parse_candidates(raw: str) -> list[dict[str, str]]:
+    def _parse_candidates(
+        raw: str,
+        allowed_user_ids: set[int],
+        provider: str,
+        model: str,
+    ) -> list[MemoryCandidate]:
         try:
             data = json.loads(LongTermMemoryService._strip_code_fence(raw))
         except (TypeError, json.JSONDecodeError):
             return []
         if not isinstance(data, list):
             return []
-        return [item for item in data if isinstance(item, dict)]
+        result: list[MemoryCandidate] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            raw_ids = item.get("evidenceMessageIds")
+            if not isinstance(raw_ids, list):
+                continue
+            evidence = tuple(
+                dict.fromkeys(
+                    int(value)
+                    for value in raw_ids
+                    if isinstance(value, int) and value in allowed_user_ids
+                )
+            )
+            if not evidence:
+                continue
+            result.append(
+                MemoryCandidate(
+                    memory_type=str(item.get("type", "")),
+                    name=str(item.get("name", "")),
+                    description=str(item.get("description", "")),
+                    body=str(item.get("body", "")),
+                    evidence_message_ids=evidence,
+                    confidence=LongTermMemoryService._bounded_confidence(
+                        item.get("confidence", 0.5)
+                    ),
+                    extraction_method="model",
+                    prompt_version="memory_candidate_v2",
+                    model_provider=provider,
+                    model_name=model,
+                )
+            )
+        return result
+
+    def _valid_user_evidence(
+        self,
+        user_id: int,
+        source_session_id: int | None,
+        evidence_ids: tuple[int, ...],
+    ) -> bool:
+        if not evidence_ids:
+            return False
+        query = self.db.query(ChatMessage.id).filter(
+            ChatMessage.id.in_(evidence_ids),
+            ChatMessage.user_id == user_id,
+            ChatMessage.role == "USER",
+        )
+        if source_session_id is not None:
+            query = query.filter(ChatMessage.session_id == source_session_id)
+        return {int(row[0]) for row in query.all()} == set(evidence_ids)
+
+    @staticmethod
+    def _evidence_ids(memory: LongTermMemory) -> tuple[int, ...]:
+        try:
+            values = json.loads(memory.evidence_message_ids_json or "[]")
+            return tuple(int(value) for value in values if int(value) > 0)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ()
+
+    @staticmethod
+    def _bounded_confidence(value) -> float:
+        try:
+            return min(1.0, max(0.0, float(value)))
+        except (TypeError, ValueError):
+            return 0.5
+
+    @staticmethod
+    def _normalize_source_messages(
+        messages: Sequence[tuple[int, str, str] | tuple[str, str]],
+    ) -> list[tuple[int, str, str]]:
+        normalized: list[tuple[int, str, str]] = []
+        for item in messages:
+            if len(item) == 3:
+                message_id, role, content = item
+            else:
+                role, content = item
+                message_id = 0
+            normalized.append((int(message_id), str(role), str(content)))
+        return normalized
+
+    def _model_identity(self) -> tuple[str, str]:
+        provider = str(getattr(self.settings, "ai_provider", "mock")).lower()
+        if provider == "ollama":
+            return provider, str(getattr(self.settings, "ollama_model", ""))
+        if provider == "openai":
+            return provider, str(getattr(self.settings, "openai_model", ""))
+        return provider, "mock"
 
     @staticmethod
     def _strip_code_fence(raw: str) -> str:

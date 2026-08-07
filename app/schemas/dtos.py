@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
 
@@ -83,6 +84,23 @@ class LongTermMemoryResponse(BaseModel):
     body: str
     createdAt: UtcDateTime
     updatedAt: UtcDateTime
+    status: str = "ACTIVE"
+    confidence: float = 0.5
+    version: int = 1
+
+
+@dataclass(frozen=True)
+class MemoryCandidate:
+    memory_type: str
+    name: str
+    description: str
+    body: str
+    evidence_message_ids: tuple[int, ...]
+    confidence: float = 0.5
+    extraction_method: str = "model"
+    prompt_version: str = "memory_candidate_v2"
+    model_provider: str = ""
+    model_name: str = ""
 
 
 class PrivacyPreferenceRequest(BaseModel):

@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
-from app.models.entities import ChatSession, LongTermMemory, UserAccount
+from app.models.entities import ChatMessage, ChatSession, LongTermMemory, UserAccount
 from app.services.long_term_memory import LongTermMemoryService
 
 
@@ -117,10 +117,24 @@ class LongTermMemoryServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.query(LongTermMemory).count(), 0)
 
     async def test_extracts_stable_items_and_filters_unsafe_items(self):
+        user_message = ChatMessage(
+            user_id=self.user.id,
+            session_id=self.session.id,
+            role="USER",
+            content="请记住，以后叫我小林。",
+        )
+        assistant_message = ChatMessage(
+            user_id=self.user.id,
+            session_id=self.session.id,
+            role="ASSISTANT",
+            content="好的，小林。",
+        )
+        self.db.add_all([user_message, assistant_message])
+        self.db.flush()
         ai = FakeAi(
-            """[
-              {"type":"PROFILE","name":"称呼","description":"学生希望被称为小林","body":"学生希望以后被称为小林。"},
-              {"type":"SUPPORT","name":"联系方式","description":"紧急联系","body":"手机号是13800138000。"}
+            f"""[
+              {{"type":"PROFILE","name":"称呼","description":"学生希望被称为小林","body":"学生希望以后被称为小林。","confidence":0.9,"evidenceMessageIds":[{user_message.id}]}},
+              {{"type":"SUPPORT","name":"联系方式","description":"紧急联系","body":"手机号是13800138000。","confidence":0.9,"evidenceMessageIds":[{user_message.id}]}}
             ]"""
         )
         service = LongTermMemoryService(self.db, self.settings, ai=ai)
@@ -129,8 +143,8 @@ class LongTermMemoryServiceTests(unittest.IsolatedAsyncioTestCase):
             self.user.id,
             self.session.id,
             [
-                ("USER", "请记住，以后叫我小林。"),
-                ("ASSISTANT", "好的，小林。"),
+                (user_message.id, "USER", "请记住，以后叫我小林。"),
+                (assistant_message.id, "ASSISTANT", "好的，小林。"),
             ],
         )
         self.db.commit()
