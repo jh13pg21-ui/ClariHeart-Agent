@@ -11,7 +11,7 @@ from app.core.config import Settings
 from app.core.database import Base, get_db
 from app.core.security import hash_password
 from app.main import create_app
-from app.models.entities import UserAccount
+from app.models.entities import OutboxEvent, UserAccount
 
 
 def test_admin_upload_returns_202_and_job_can_be_read(tmp_path):
@@ -57,18 +57,23 @@ def test_admin_upload_returns_202_and_job_can_be_read(tmp_path):
         )
         assert login.status_code == 200
         csrf = client.cookies.get("mindbridge_csrf")
-        with patch("app.rag_ingestion.service.dispatch_ingestion_task") as dispatch:
-            response = client.post(
-                "/api/admin/knowledge/files",
-                headers={"X-CSRF-Token": csrf},
-                files={"file": ("guide.pdf", b"%PDF-1.4\nfixture", "application/pdf")},
-            )
+        response = client.post(
+            "/api/admin/knowledge/files",
+            headers={"X-CSRF-Token": csrf},
+            files={"file": ("guide.pdf", b"%PDF-1.4\nfixture", "application/pdf")},
+        )
         assert response.status_code == 202
         body = response.json()
         assert {"documentId", "versionId", "jobId", "status"} <= set(body)
-        dispatch.assert_called_once_with(body["jobId"])
+        with session_factory() as db:
+            event = db.query(OutboxEvent).one()
+            assert event.event_type == "knowledge.ingest"
+            assert event.aggregate_id == body["jobId"]
 
         job = client.get(f"/api/admin/knowledge/jobs/{body['jobId']}")
         assert job.status_code == 200
         assert job.json()["status"] == "PENDING"
+        jobs = client.get("/api/admin/knowledge/jobs?limit=20")
+        assert jobs.status_code == 200
+        assert [item["jobId"] for item in jobs.json()] == [body["jobId"]]
     engine.dispose()

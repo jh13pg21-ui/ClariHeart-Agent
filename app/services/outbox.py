@@ -35,6 +35,8 @@ class OutboxService:
             "riskLevel": payload.get("riskLevel"),
             "eventId": event_id,
         }
+        if payload.get("jobId") is not None:
+            minimal_payload["jobId"] = payload["jobId"]
         event = OutboxEvent(
             event_id=event_id,
             idempotency_key=idempotency_key,

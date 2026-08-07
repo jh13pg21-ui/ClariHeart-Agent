@@ -390,7 +390,7 @@ curl -b admin.cookies -H "X-CSRF-Token: $ADMIN_CSRF" \
   http://127.0.0.1:8080/api/admin/knowledge
 ```
 
-追加知识库返回 `202 Accepted`，解析、OCR、Vision、切块和索引均由 `mindbridge.ingestion` 队列异步完成。新版本完成索引集合校验后才原子激活；失败时旧 active 版本继续提供检索。
+追加知识库返回 `202 Accepted`，只表示原始文件、摄取 Job 与 `knowledge.ingest` Transactional Outbox 事件已经在同一业务事务中可靠保存，不表示文档已经可检索。Outbox Publisher 将事件投递至 `mindbridge.ingestion`，解析、OCR、Vision、切块和索引全部由独立的单并发 ingestion worker 异步完成；RabbitMQ 暂时不可用时按退避策略重试，投递耗尽后 Job 进入可重试的 `QUEUE_PUBLISH_FAILED`。新版本完成索引集合校验后才原子激活，失败时旧 active 版本继续提供检索。管理员端提供任务中心，按 `PENDING / RUNNING / COMPLETED / FAILED / NEEDS_REVIEW` 展示阶段、页数进度、错误与重试操作，浏览器离开页面不会中断后台任务。
 
 ## RAG 评测
 
@@ -430,6 +430,7 @@ POST /api/admin/knowledge/files
 GET  /api/admin/knowledge/documents
 GET  /api/admin/knowledge/documents/{documentId}
 GET  /api/admin/knowledge/documents/{documentId}/pages
+GET  /api/admin/knowledge/jobs?limit=50
 GET  /api/admin/knowledge/jobs/{jobId}
 POST /api/admin/knowledge/jobs/{jobId}/retry
 ```

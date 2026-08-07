@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal
+from app.models.entities import KnowledgeIngestionJob
 from app.rag_ingestion.artifacts import ArtifactStore
 from app.rag_ingestion.chunking import ChunkingConfig, StructureAwareChunker
 from app.rag_ingestion.errors import RetryableIngestionError
@@ -88,6 +89,9 @@ def run_ingestion_job(db: Session, settings: Settings, job_id: str) -> None:
 def ingest_knowledge_document(self, job_id: str) -> dict:
     db = SessionLocal()
     try:
+        existing = db.get(KnowledgeIngestionJob, job_id)
+        if existing is not None and existing.status == "COMPLETED":
+            return {"jobId": job_id, "status": "COMPLETED"}
         run_ingestion_job(db, worker_settings, job_id)
     except RetryableIngestionError as exc:
         countdown = min(300, 15 * (2 ** self.request.retries))

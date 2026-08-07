@@ -81,15 +81,41 @@
             </div>
           </summary>
           <div class="module-body">
-            <form id="knowledgeUploadForm" class="upload-row">
-              <input id="knowledgeFile" type="file" accept=".pdf,.md,.markdown,.txt,application/pdf,text/markdown,text/plain">
-              <button class="primary" type="submit">上传入库</button>
+            <form id="knowledgeUploadForm" class="knowledge-upload-card">
+              <div class="knowledge-upload-copy">
+                <strong>提交文档，后台处理</strong>
+                <span>文件保存并进入可靠队列后即可离开本页，无需等待解析完成。</span>
+              </div>
+              <div class="upload-row">
+                <label class="knowledge-file-picker" for="knowledgeFile">
+                  <span>选择 PDF / Markdown / TXT</span>
+                  <input id="knowledgeFile" type="file" accept=".pdf,.md,.markdown,.txt,application/pdf,text/markdown,text/plain">
+                </label>
+                <button id="knowledgeSubmit" class="primary" type="submit">上传并后台处理</button>
+              </div>
+              <label class="knowledge-consent">
+                <input id="knowledgeVisionAllowed" type="checkbox">
+                <span><strong>允许云端视觉分析</strong>：仅在复杂页面被路由选中时，将页面图像发送给 Vision API。</span>
+              </label>
             </form>
             <div class="admin-actions">
               <button id="rebuildVector" class="ghost" type="button">重建向量索引</button>
               <button id="backupVector" class="ghost" type="button">备份向量索引</button>
             </div>
-            <p id="knowledgeUploadState" class="hint">支持 PDF、Markdown、txt 文件</p>
+            <p id="knowledgeUploadState" class="knowledge-notice" role="status" aria-live="polite">支持 PDF、Markdown、TXT；提交成功不代表已经完成入库。</p>
+            <section class="knowledge-job-board" aria-labelledby="knowledgeJobsTitle">
+              <div class="knowledge-job-board-head">
+                <div>
+                  <p class="panel-label">INGESTION QUEUE</p>
+                  <h3 id="knowledgeJobsTitle">文档处理任务</h3>
+                </div>
+                <div class="knowledge-job-tools">
+                  <span id="knowledgeJobsCount" class="module-count">0 个任务</span>
+                  <button id="refreshKnowledgeJobs" class="ghost compact" type="button">刷新进度</button>
+                </div>
+              </div>
+              <div id="knowledgeJobs" class="knowledge-jobs" aria-live="polite"></div>
+            </section>
           </div>
         </details>
       </div>
@@ -136,6 +162,7 @@
   </main>
 
   <script src="/admin-panels.js?v=collapsible-panels-20260729"></script>
-  <script src="/admin.js?v=collapsible-panels-20260729"></script>
+  <script src="/admin-knowledge.js?v=async-ingestion-20260807"></script>
+  <script src="/admin.js?v=async-ingestion-20260807"></script>
 </body>
 </html>

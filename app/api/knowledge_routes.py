@@ -144,6 +144,16 @@ def get_knowledge_job(
         raise HTTPException(404, str(exc)) from exc
 
 
+@router.get("/jobs")
+def list_knowledge_jobs(
+    request: Request,
+    _: Annotated[UserAccount, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = Query(50, ge=1, le=100),
+):
+    return _service(request, db).list_jobs(limit=limit)
+
+
 @router.post("/jobs/{job_id}/retry", status_code=202)
 def retry_knowledge_job(
     job_id: str,

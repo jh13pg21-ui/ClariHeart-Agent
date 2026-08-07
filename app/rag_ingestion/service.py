@@ -19,6 +19,7 @@ from app.models.entities import (
 from app.rag_ingestion.artifacts import ArtifactStore
 from app.rag_ingestion.repository import KnowledgeIngestionRepository
 from app.rag_ingestion.schema import AccessClass
+from app.services.outbox import OutboxService
 from app.services.vector_store import ChromaKnowledgeStore
 
 
@@ -103,7 +104,7 @@ class KnowledgeIngestionService:
             artifact_root = settings.project_root / artifact_root
         self.artifacts = ArtifactStore(artifact_root)
         self.repository = KnowledgeIngestionRepository(db)
-        self.task_dispatcher = task_dispatcher or dispatch_ingestion_task
+        self.task_dispatcher = task_dispatcher
 
     def submit_file(
         self,
@@ -118,19 +119,27 @@ class KnowledgeIngestionService:
     ) -> IngestionSubmission:
         display_name, canonical_mime = self._validate_file(filename, mime_type, data)
         sha256 = hashlib.sha256(data).hexdigest()
-        submission = self.repository.ensure_submission(
-            source_key=source_key or f"admin:{display_name.casefold()}",
-            display_name=display_name,
-            mime_type=canonical_mime,
-            sha256=sha256,
-            size_bytes=len(data),
-            access_class=access_class,
-            cloud_vision_allowed=bool(cloud_vision_allowed),
-            trigger_actor=actor,
-            pipeline_fingerprint=self.settings.rag_pipeline_fingerprint,
-        )
-        source_path = self.artifacts.write_source(submission.document.id, sha256, data)
-        if submission.created:
+        try:
+            submission = self.repository.ensure_submission(
+                source_key=source_key or f"admin:{display_name.casefold()}",
+                display_name=display_name,
+                mime_type=canonical_mime,
+                sha256=sha256,
+                size_bytes=len(data),
+                access_class=access_class,
+                cloud_vision_allowed=bool(cloud_vision_allowed),
+                trigger_actor=actor,
+                pipeline_fingerprint=self.settings.rag_pipeline_fingerprint,
+                commit=False,
+            )
+            source_path = self.artifacts.write_source(submission.document.id, sha256, data)
+            if submission.created and self.task_dispatcher is None:
+                self._add_ingestion_event(submission.job.id)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+        if submission.created and self.task_dispatcher is not None:
             self.task_dispatcher(submission.job.id)
         return self._submission_result(submission, source_path)
 
@@ -141,16 +150,25 @@ class KnowledgeIngestionService:
         actor: str,
         cloud_vision_allowed: bool | None = None,
     ) -> IngestionSubmission:
-        job = self.repository.create_retry_job(
-            job_id,
-            trigger_actor=actor,
-            cloud_vision_allowed=cloud_vision_allowed,
-        )
+        try:
+            job = self.repository.create_retry_job(
+                job_id,
+                trigger_actor=actor,
+                cloud_vision_allowed=cloud_vision_allowed,
+                commit=False,
+            )
+            if self.task_dispatcher is None:
+                self._add_ingestion_event(job.id)
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         _, version, document = self.repository.get_context(job.id)
         source_path = self.artifacts.version_dir(document.id, version.sha256) / "source.bin"
         if not source_path.is_file():
             raise FileNotFoundError("The source artifact for this ingestion version is missing.")
-        self.task_dispatcher(job.id)
+        if self.task_dispatcher is not None:
+            self.task_dispatcher(job.id)
         return IngestionSubmission(
             document_id=document.id,
             version_id=version.id,
@@ -164,6 +182,33 @@ class KnowledgeIngestionService:
     def get_job(self, job_id: str) -> dict:
         job, version, document = self.repository.get_context(job_id)
         return self._job_dict(job, version, document)
+
+    def list_jobs(self, *, limit: int = 50) -> list[dict]:
+        rows = (
+            self.db.query(KnowledgeIngestionJob)
+            .order_by(KnowledgeIngestionJob.created_at.desc())
+            .limit(max(1, min(limit, 100)))
+            .all()
+        )
+        result = []
+        for job in rows:
+            version = self.db.get(KnowledgeDocumentVersion, job.document_version_id)
+            if version is None:
+                continue
+            document = self.db.get(KnowledgeDocument, version.document_id)
+            if document is not None:
+                result.append(self._job_dict(job, version, document))
+        return result
+
+    def _add_ingestion_event(self, job_id: str) -> None:
+        OutboxService.add_event(
+            self.db,
+            "knowledge.ingest",
+            "knowledge_ingestion_job",
+            job_id,
+            {"jobId": job_id},
+            f"knowledge.ingest:{job_id}",
+        )
 
     def list_documents(self) -> list[dict]:
         rows = self.db.query(KnowledgeDocument).order_by(KnowledgeDocument.updated_at.desc()).all()
@@ -283,4 +328,5 @@ class KnowledgeIngestionService:
             ),
             "createdAt": job.created_at,
             "updatedAt": job.updated_at,
+            "finishedAt": job.finished_at,
         }

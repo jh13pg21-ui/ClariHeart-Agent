@@ -1,14 +1,21 @@
 import unittest
+import json
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
-from app.models.entities import OutboxEvent
+from app.models.entities import (
+    KnowledgeDocument,
+    KnowledgeDocumentVersion,
+    KnowledgeIngestionJob,
+    OutboxEvent,
+)
 from app.services.outbox import OutboxService
-from app.workers.outbox_publisher import OutboxPublisher
+from app.workers.outbox_publisher import CeleryBroker, OutboxPublisher
 
 
 class FakeBroker:
@@ -90,6 +97,81 @@ class OutboxPublisherTests(unittest.TestCase):
         self.assertEqual(event.status, "DEAD")
         self.assertEqual(event.attempts, 1)
         self.assertIn("broker unavailable", event.last_error)
+        db.close()
+
+    def test_knowledge_ingestion_event_targets_dedicated_queue_with_job_id(self):
+        settings = SimpleNamespace(
+            celery_alert_queue="mindbridge.alert",
+            celery_general_queue="mindbridge.general",
+            rag_ingestion_queue="mindbridge.ingestion",
+        )
+        event = SimpleNamespace(
+            event_type="knowledge.ingest",
+            event_id="event-1",
+            aggregate_id="job_123",
+            idempotency_key="knowledge.ingest:job_123",
+            payload_json=json.dumps({"jobId": "job_123"}),
+        )
+
+        with patch("app.workers.outbox_publisher.celery_app.send_task") as send_task:
+            CeleryBroker(settings).publish(event)
+
+        send_task.assert_called_once()
+        args, kwargs = send_task.call_args
+        self.assertEqual(args[0], "app.workers.ingestion_tasks.ingest_knowledge_document")
+        self.assertEqual(kwargs["args"], ["job_123"])
+        self.assertEqual(kwargs["queue"], "mindbridge.ingestion")
+        self.assertEqual(kwargs["routing_key"], "mindbridge.ingestion")
+
+    def test_exhausted_knowledge_publish_marks_job_as_retryable_failure(self):
+        db = self.Session()
+        document = KnowledgeDocument(
+            id="doc_1",
+            source_key="admin:guide.pdf",
+            display_name="guide.pdf",
+            mime_type="application/pdf",
+            access_class="ADMIN_PRIVATE",
+        )
+        version = KnowledgeDocumentVersion(
+            id="docver_1",
+            document_id=document.id,
+            sha256="a" * 64,
+            size_bytes=100,
+            status="PENDING",
+            pipeline_fingerprint="rag-v3",
+        )
+        job = KnowledgeIngestionJob(
+            id="job_1",
+            document_version_id=version.id,
+            stage="PENDING",
+            status="PENDING",
+            trigger_actor="admin",
+        )
+        db.add_all([document, version, job])
+        db.flush()
+        OutboxService.add_event(
+            db,
+            "knowledge.ingest",
+            "knowledge_ingestion_job",
+            job.id,
+            {"jobId": job.id},
+            f"knowledge.ingest:{job.id}",
+        )
+        db.commit()
+        db.close()
+
+        OutboxPublisher(
+            self.Session,
+            FakeBroker(RuntimeError("broker unavailable"), max_attempts=1),
+        ).publish_batch(10)
+
+        db = self.Session()
+        failed = db.get(KnowledgeIngestionJob, "job_1")
+        self.assertEqual(failed.status, "FAILED")
+        self.assertEqual(failed.stage, "QUEUE_FAILED")
+        self.assertEqual(failed.error_code, "QUEUE_PUBLISH_FAILED")
+        self.assertTrue(failed.error_retryable)
+        self.assertEqual(db.get(KnowledgeDocumentVersion, "docver_1").status, "FAILED")
         db.close()
 
 

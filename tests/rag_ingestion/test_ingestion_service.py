@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.database import Base
-from app.models.entities import KnowledgeChunk
+from app.models.entities import KnowledgeChunk, OutboxEvent
 from app.rag_ingestion.schema import AccessClass
 from app.rag_ingestion.service import KnowledgeChunkIndexer, KnowledgeIngestionService
 
@@ -55,6 +55,36 @@ def test_submit_file_is_deduplicated_and_private_cloud_is_opt_in(tmp_path):
         assert calls == [first.job_id]
         assert first.cloud_vision_allowed is False
         assert Path(first.source_path).read_bytes() == b"%PDF-1.4\nfixture"
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_default_submission_records_transactional_outbox_event(tmp_path):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = Session(engine)
+    settings = Settings(
+        app_environment="test",
+        rag_artifact_dir=str(tmp_path / "artifacts"),
+        knowledge_vector_enabled=False,
+    )
+    try:
+        submitted = KnowledgeIngestionService(db, settings).submit_file(
+            filename="async.pdf",
+            data=b"%PDF-1.4\nfixture",
+            mime_type="application/pdf",
+            actor="admin",
+            access_class=AccessClass.ADMIN_PRIVATE,
+        )
+
+        event = db.query(OutboxEvent).one()
+        assert event.event_type == "knowledge.ingest"
+        assert event.aggregate_type == "knowledge_ingestion_job"
+        assert event.aggregate_id == submitted.job_id
+        assert event.idempotency_key == f"knowledge.ingest:{submitted.job_id}"
+        assert f'"jobId":"{submitted.job_id}"' in event.payload_json
+        assert event.status == "PENDING"
     finally:
         db.close()
         engine.dispose()

@@ -49,6 +49,7 @@ class KnowledgeIngestionRepository:
         cloud_vision_allowed: bool,
         trigger_actor: str,
         pipeline_fingerprint: str,
+        commit: bool = True,
     ) -> Submission:
         document = self.db.query(KnowledgeDocument).filter_by(source_key=source_key).one_or_none()
         if document is None:
@@ -111,7 +112,10 @@ class KnowledgeIngestionRepository:
                 trigger_actor=trigger_actor,
             )
             self.db.add(job)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return Submission(document=document, version=version, job=job, created=created)
 
     def get_context(self, job_id: str) -> tuple[KnowledgeIngestionJob, KnowledgeDocumentVersion, KnowledgeDocument]:
@@ -132,6 +136,7 @@ class KnowledgeIngestionRepository:
         *,
         trigger_actor: str,
         cloud_vision_allowed: bool | None = None,
+        commit: bool = True,
     ) -> KnowledgeIngestionJob:
         previous, version, document = self.get_context(job_id)
         if previous.status == "FAILED" and not previous.error_retryable:
@@ -161,7 +166,10 @@ class KnowledgeIngestionRepository:
             trigger_actor=trigger_actor,
         )
         self.db.add(retry)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return retry
 
     def update_stage(self, job_id: str, stage: str, *, progress_page: int | None = None, total_pages: int | None = None) -> None:

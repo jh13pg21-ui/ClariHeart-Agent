@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal
-from app.models.entities import OutboxEvent
+from app.models.entities import KnowledgeDocumentVersion, KnowledgeIngestionJob, OutboxEvent
 from app.workers.celery_app import celery_app
 
 
@@ -29,6 +29,10 @@ class CeleryBroker:
             "app.workers.tasks.refresh_conversation_summary",
             "general",
         ),
+        "knowledge.ingest": (
+            "app.workers.ingestion_tasks.ingest_knowledge_document",
+            "ingestion",
+        ),
     }
 
     def __init__(self, settings: Settings):
@@ -39,15 +43,21 @@ class CeleryBroker:
         if task is None:
             raise ValueError(f"不支持的 Outbox 事件类型：{event.event_type}")
         task_name, queue_kind = task
-        queue = (
-            self.settings.celery_alert_queue
-            if queue_kind == "alert"
-            else self.settings.celery_general_queue
-        )
+        if queue_kind == "alert":
+            queue = self.settings.celery_alert_queue
+        elif queue_kind == "ingestion":
+            queue = self.settings.rag_ingestion_queue
+        else:
+            queue = self.settings.celery_general_queue
         payload = json.loads(event.payload_json)
+        args = (
+            [str(payload["jobId"])]
+            if event.event_type == "knowledge.ingest"
+            else [event.event_id, int(event.aggregate_id)]
+        )
         celery_app.send_task(
             task_name,
-            args=[event.event_id, int(event.aggregate_id)],
+            args=args,
             task_id=event.event_id,
             queue=queue,
             routing_key=queue,
@@ -97,6 +107,7 @@ class OutboxPublisher:
                         ),
                     ):
                         event.status = "DEAD"
+                        self._mark_ingestion_publish_failure(db, event)
                     else:
                         event.available_at = datetime.utcnow() + timedelta(
                             seconds=min(300, 2 ** event.attempts)
@@ -115,6 +126,24 @@ class OutboxPublisher:
             raise
         finally:
             db.close()
+
+    @staticmethod
+    def _mark_ingestion_publish_failure(db: Session, event: OutboxEvent) -> None:
+        if event.event_type != "knowledge.ingest":
+            return
+        job = db.get(KnowledgeIngestionJob, event.aggregate_id)
+        if job is None or job.status != "PENDING":
+            return
+        job.status = "FAILED"
+        job.stage = "QUEUE_FAILED"
+        job.error_code = "QUEUE_PUBLISH_FAILED"
+        job.error_message = "入库任务多次投递失败，请检查 RabbitMQ 后重试。"
+        job.error_retryable = True
+        job.finished_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
+        version = db.get(KnowledgeDocumentVersion, job.document_version_id)
+        if version is not None:
+            version.status = "FAILED"
 
 
 def run_forever() -> None:
