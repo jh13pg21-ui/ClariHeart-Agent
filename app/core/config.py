@@ -57,6 +57,8 @@ class Settings(BaseSettings):
     model_recovery_jitter_ratio: float = 0.25
     model_recovery_max_continuations: int = 2
     model_stream_release_chars: int = 256
+    model_gateway_enabled: bool = True
+    recovery_orchestrator_enabled: bool = True
     prompt_registry_enabled: bool = True
     context_planner_enabled: bool = True
     context_planner_shadow_mode: bool = False
@@ -149,6 +151,8 @@ class Settings(BaseSettings):
     long_term_memory_relevant_items: int = 5
     long_term_memory_extract_messages: int = 10
     long_term_memory_extract_min_new_messages: int = 6
+    memory_v2_enabled: bool = True
+    memory_v2_shadow_mode: bool = False
     memory_consolidation_enabled: bool = False
     memory_consolidation_min_interval_hours: float = 24.0
     memory_consolidation_min_active_memories: int = 10

@@ -528,3 +528,61 @@ python -m app.mcp_tools.server
 - `academic_stress_planning`：考试、作业、论文、绩点压力的下一步拆解。
 - `referral_resource_guidance`：校内心理中心、辅导员、可信任支持人和紧急资源转介。
 - `counselor_handoff_summary`：生成给辅导员/管理员看的个案交接摘要模板。
+
+## 生产级 Prompt、上下文、记忆与错误恢复
+
+这一层参考 `learn-claude-code/s08_context_compact` 到 `s11_error_recovery` 的机制边界重新实现，不复制教学代码。生产请求统一经过以下链路：
+
+```text
+版本化 Prompt Registry
+  -> 可信指令 / 不可信数据分区组装
+  -> ModelCapabilities + provider-aware token 估算
+  -> L0 去重 / L1 分类预算 / L2 摘要替换 / L3 70% 水位压缩
+  -> 本地模型优先的 Model Gateway
+  -> 有界重试、流恢复、输出续写或受控云降级
+  -> 脱敏 Trace + Prometheus 聚合指标
+```
+
+关键生产约束：
+
+- Prompt 以语义化 ID、版本、输入变量和输出 Schema 注册，启动时校验发布清单；Prompt Manifest 只记录哈希和版本，不记录正文。
+- Context Planner 依据目标模型的真实窗口计算输入预算，必需区段不可静默删除；Provider 返回 `PROMPT_TOO_LONG` 时，每个请求最多执行一次 emergency allowlist 压缩，第二次失败转为明确的 `CONTEXT_UNRECOVERABLE`。
+- 短期记忆以 MySQL 为权威检查点、Redis 为可丢失缓存；摘要调度使用单调 watermark 和事务预留，避免并发重复任务与旧摘要覆盖新摘要。
+- 长期记忆保存证据消息 ID、模型与 Prompt 来源、置信度、有效期和版本状态。相同事实追加证据，事实变化创建新版本并将旧版本标记为 `SUPERSEDED`，不做物理覆盖。
+- Consolidator 通过 Outbox/Celery 异步执行，只接受 `KEEP / MERGE / SUPERSEDE / EXPIRE` 白名单动作；默认关闭，需先观察候选量和评测结果再受控启用。
+- 429、529、超时和网络异常使用带 jitter 的指数退避，并共享总 deadline；流在 `done` 前中断时只做一次缓冲恢复。低/中风险只有在已脱敏且带有效 context manifest 时才允许云降级，高风险请求在代码策略层永久禁止云外发，不存在环境变量绕过入口。
+
+生产默认开关：
+
+```dotenv
+MODEL_GATEWAY_ENABLED=true
+RECOVERY_ORCHESTRATOR_ENABLED=true
+PROMPT_REGISTRY_ENABLED=true
+CONTEXT_PLANNER_ENABLED=true
+CONTEXT_PLANNER_SHADOW_MODE=false
+MEMORY_V2_ENABLED=true
+MEMORY_V2_SHADOW_MODE=false
+MEMORY_CONSOLIDATION_ENABLED=false
+```
+
+出现回归时，优先关闭 `MEMORY_CONSOLIDATION_ENABLED`，再将 Context Planner 切到 shadow 观察模式，最后才回退 Prompt/Memory 应用版本。数据库迁移只新增字段和表，不通过回滚删除已有证据或审计数据。`MODEL_GATEWAY_ENABLED` 与 `RECOVERY_ORCHESTRATOR_ENABLED` 是发布状态声明；安全出站策略始终生效，不能通过回滚开关关闭。
+
+管理员可通过 `GET /api/admin/runtime-metrics` 查看模型调用、恢复原因、上下文压缩和记忆任务的低基数聚合指标及 p50/p95/p99 延迟。接口受管理员权限保护，响应不包含用户 ID、会话 ID、消息正文、Prompt 或模型输出正文。
+
+离线故障注入评测不访问真实 Provider：
+
+```bash
+python -m app.context_eval.runner --json
+```
+
+版本化数据集覆盖正常请求、上下文超限、429、529、超时、非法 JSON、流中断、Redis 不可用和高风险过载，自动检查必需区段保留率、token 压缩率、重试上限、fallback 路由和云外发次数。完整回归命令为：
+
+```bash
+python -m pytest -q --ignore=tests/rag_ingestion/test_evaluation.py
+python -m app.harness.runner --json
+python -m app.context_eval.runner --json
+```
+
+当前忽略项仅是本地缺少 `app/knowledge/pdf/一图读懂：健康中国行动.pdf` 的 PDF gold-data 测试，不属于本次机制回归失败。
+
+面试中可以围绕三个工程问题展开：如何把“拼字符串”升级为按模型能力预算且可审计的上下文系统；如何用证据、版本和异步整合解决长期记忆污染；如何在 deadline、幂等、隐私边界和降级矩阵约束下恢复模型与基础设施故障。对应实现分别位于 `app/context` 与 `app/prompts`、`app/services/long_term_memory.py` 与 `app/services/memory_consolidation.py`、`app/llm` 与 `app/context_eval`。
