@@ -3,6 +3,7 @@
 from app.llm.capabilities import ModelCapabilities, ModelCapabilitiesRegistry
 from app.llm.contracts import ModelRequest, ModelResult, ModelStreamEvent
 from app.llm.errors import ModelError, ModelErrorCode
+from app.llm.providers import ModelProvider, OllamaProvider, OpenAICompatibleProvider
 
 __all__ = [
     "ModelCapabilities",
@@ -12,4 +13,7 @@ __all__ = [
     "ModelStreamEvent",
     "ModelError",
     "ModelErrorCode",
+    "ModelProvider",
+    "OllamaProvider",
+    "OpenAICompatibleProvider",
 ]
