@@ -260,6 +260,9 @@ class KnowledgeIngestionRepository:
         version.completed_at = _now()
         job.stage = "COMPLETED"
         job.status = "COMPLETED"
+        job.error_code = None
+        job.error_message = None
+        job.error_retryable = False
         job.finished_at = _now()
         job.updated_at = _now()
         self.db.commit()

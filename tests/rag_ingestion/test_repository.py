@@ -82,3 +82,44 @@ def test_activation_switches_versions_only_after_new_chunks_exist():
         assert db.query(KnowledgeChunk).filter_by(stable_id="chunk_new").one().active is True
         assert second.document.active_version_id == second.version.id
     engine.dispose()
+
+
+def test_successful_activation_clears_error_left_by_an_automatic_retry():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        repository = KnowledgeIngestionRepository(db)
+        submission = repository.ensure_submission(
+            source_key="builtin:retry.pdf",
+            display_name="retry.pdf",
+            mime_type="application/pdf",
+            sha256="c" * 64,
+            size_bytes=100,
+            access_class=AccessClass.BUILTIN_PUBLIC,
+            cloud_vision_allowed=True,
+            trigger_actor="bootstrap",
+            pipeline_fingerprint="rag-v2",
+        )
+        chunk = KnowledgeChunk(
+            source="retry.pdf",
+            source_index=0,
+            content="重试后成功的内容",
+            stable_id="chunk_retry",
+            document_id=submission.document.id,
+            document_version_id=submission.version.id,
+            chunk_kind="CHILD",
+            active=False,
+        )
+        submission.job.error_code = "VISION_UPSTREAM_RETRYABLE"
+        submission.job.error_message = "Vision 上游暂时不可用"
+        submission.job.error_retryable = True
+        db.add(chunk)
+        db.commit()
+
+        repository.activate(submission.job.id, {"chunk_retry"})
+
+        assert submission.job.status == "COMPLETED"
+        assert submission.job.error_code is None
+        assert submission.job.error_message is None
+        assert submission.job.error_retryable is False
+    engine.dispose()
