@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     ai_provider: str = "ollama"
     ai_temperature: float = 0.35
     ai_max_tokens: int = 512
+    model_context_window_default: int = 8192
+    model_ollama_context_window: int = 32768
+    model_ollama_max_output_tokens: int = 4096
+    model_ollama_tokenizer_kind: str = "conservative"
+    model_ollama_tokenizer_path: str = ""
+    model_openai_context_window: int = 128000
+    model_openai_max_output_tokens: int = 16384
+    model_openai_tokenizer_kind: str = "tiktoken"
+    model_recovery_reserve_tokens: int = 1024
+    model_provider_safety_margin_ratio: float = 0.10
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "mindbridge-qwen2.5-7b-ft:latest"
     finetuned_model_name: str = "mindbridge-qwen2.5-7b-ft:latest"

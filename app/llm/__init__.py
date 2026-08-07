@@ -1,0 +1,13 @@
+"""统一模型调用、路由与恢复基础设施。"""
+
+from app.llm.capabilities import ModelCapabilities, ModelCapabilitiesRegistry
+from app.llm.contracts import ModelRequest, ModelResult, ModelStreamEvent
+
+__all__ = [
+    "ModelCapabilities",
+    "ModelCapabilitiesRegistry",
+    "ModelRequest",
+    "ModelResult",
+    "ModelStreamEvent",
+]
+
