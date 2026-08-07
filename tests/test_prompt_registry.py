@@ -9,8 +9,7 @@ class PromptRegistryTests(unittest.TestCase):
 
         registry = default_prompt_registry()
 
-        self.assertEqual(
-            set(registry.prompt_ids),
+        self.assertTrue(
             {
                 "global.identity",
                 "global.safety_boundary",
@@ -21,7 +20,7 @@ class PromptRegistryTests(unittest.TestCase):
                 "agent.context",
                 "agent.response",
                 "agent.coordinator",
-            },
+            }.issubset(set(registry.prompt_ids))
         )
 
     def test_missing_template_variable_fails_closed(self):

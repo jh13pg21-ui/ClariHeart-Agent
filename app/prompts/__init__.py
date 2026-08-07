@@ -7,6 +7,7 @@ from app.prompts.registry import (
     PromptRenderError,
     PromptVersionMismatch,
     RenderedPrompt,
+    SchemaDefinition,
     default_prompt_registry,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "PromptRenderError",
     "PromptVersionMismatch",
     "RenderedPrompt",
+    "SchemaDefinition",
     "default_prompt_registry",
 ]

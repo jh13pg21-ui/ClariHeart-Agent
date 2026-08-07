@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "conversation_summary_v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "studentConcerns", "preferences", "effectiveSupports", "unresolvedThreads", "safetyContinuity"],
+  "$defs": {
+    "summaryItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "evidenceMessageIds"],
+      "properties": {
+        "summary": {"type": "string", "minLength": 1, "maxLength": 500},
+        "topic": {"type": "string", "maxLength": 80},
+        "evidenceMessageIds": {"type": "array", "minItems": 1, "maxItems": 20, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}}
+      }
+    }
+  },
+  "properties": {
+    "schemaVersion": {"const": 2},
+    "studentConcerns": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/summaryItem"}},
+    "preferences": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/summaryItem"}},
+    "effectiveSupports": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/summaryItem"}},
+    "unresolvedThreads": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/summaryItem"}},
+    "safetyContinuity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["followUpNeeded", "summary", "evidenceMessageIds"],
+      "properties": {
+        "followUpNeeded": {"type": "boolean"},
+        "summary": {"type": "string", "maxLength": 500},
+        "evidenceMessageIds": {"type": "array", "maxItems": 20, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}}
+      }
+    }
+  }
+}
