@@ -2,6 +2,7 @@
 
 from app.llm.capabilities import ModelCapabilities, ModelCapabilitiesRegistry
 from app.llm.contracts import ModelRequest, ModelResult, ModelStreamEvent
+from app.llm.errors import ModelError, ModelErrorCode
 
 __all__ = [
     "ModelCapabilities",
@@ -9,5 +10,6 @@ __all__ = [
     "ModelRequest",
     "ModelResult",
     "ModelStreamEvent",
+    "ModelError",
+    "ModelErrorCode",
 ]
-
