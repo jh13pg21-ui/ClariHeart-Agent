@@ -59,11 +59,14 @@ class IngestionPipeline:
         try:
             job, version, document = self.repository.get_context(job_id)
             canonical_path = self.artifact_store.version_dir(document.id, version.sha256) / "document.json"
+            canonical = None
             if canonical_path.exists():
-                canonical = CanonicalDocument.model_validate(
+                cached = CanonicalDocument.model_validate(
                     self.artifact_store.read_json(document.id, version.sha256, "document.json")
                 )
-            else:
+                if cached.document_id == document.id and cached.version_id == version.id:
+                    canonical = cached
+            if canonical is None:
                 canonical = self._extract_and_fuse(job_id, version, document)
                 self.artifact_store.write_json(document.id, version.sha256, "document.json", canonical)
                 version.canonical_artifact_path = str(canonical_path)
@@ -79,10 +82,12 @@ class IngestionPipeline:
             self.repository.update_stage(job_id, "ACTIVATING", total_pages=len(canonical.pages))
             self.repository.activate(job_id, indexed_ids)
         except NeedsReviewError as exc:
+            self.repository.db.rollback()
             code, message, retryable = sanitize_error(exc)
             self.repository.fail(job_id, status="NEEDS_REVIEW", code=code, message=message, retryable=retryable)
             raise
         except Exception as exc:
+            self.repository.db.rollback()
             code, message, retryable = sanitize_error(exc)
             self.repository.fail(job_id, status="FAILED", code=code, message=message, retryable=retryable)
             raise

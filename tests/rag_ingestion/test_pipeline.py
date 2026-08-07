@@ -10,6 +10,7 @@ from app.rag_ingestion.chunking import ChunkingConfig, StructureAwareChunker
 from app.rag_ingestion.fusion import PageEvidenceFusion
 from app.rag_ingestion.errors import IngestionError
 from app.rag_ingestion.pipeline import IngestionPipeline
+from app.models.entities import KnowledgeChunk
 from app.rag_ingestion.repository import KnowledgeIngestionRepository
 from app.rag_ingestion.routing import PageRouter
 from app.rag_ingestion.schema import (
@@ -74,6 +75,26 @@ class RecordingIndexer:
     def index(self, chunks):
         self.calls += 1
         return {chunk.stable_id for chunk in chunks if chunk.chunk_kind == "CHILD"}
+
+
+class RollbackRecordingSession:
+    def __init__(self):
+        self.rollback_called = False
+
+    def rollback(self):
+        self.rollback_called = True
+
+
+class FailingRepository:
+    def __init__(self):
+        self.db = RollbackRecordingSession()
+        self.fail_called = False
+
+    def get_context(self, job_id):
+        raise RuntimeError("database flush failed")
+
+    def fail(self, job_id, **kwargs):
+        self.fail_called = True
 
 
 def test_pipeline_runs_native_local_path_and_activates_only_after_index_validation(tmp_path):
@@ -149,3 +170,67 @@ def test_pipeline_rejects_documents_over_page_limit(tmp_path):
         db.refresh(submission.job)
         assert submission.job.status == "FAILED"
     engine.dispose()
+
+
+def test_pipeline_rebuilds_canonical_cache_when_version_id_does_not_match(tmp_path):
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        repository = KnowledgeIngestionRepository(db)
+        submission = repository.ensure_submission(
+            source_key="admin:cache.txt", display_name="cache.txt", mime_type="text/plain",
+            sha256="d" * 64, size_bytes=7, access_class=AccessClass.ADMIN_PRIVATE,
+            cloud_vision_allowed=False, trigger_actor="admin", pipeline_fingerprint="rag-v3",
+        )
+        store = ArtifactStore(tmp_path)
+        store.write_source(submission.document.id, submission.version.sha256, b"content")
+        parser = FakeParser()
+        pipeline = IngestionPipeline(
+            repository=repository,
+            artifact_store=store,
+            parsers={"text/plain": parser},
+            router=PageRouter(),
+            ocr_provider=ForbiddenProvider(),
+            vision_provider=ForbiddenProvider(),
+            fusion=PageEvidenceFusion(),
+            chunker=StructureAwareChunker(ChunkingConfig(child_min_tokens=1)),
+            indexer=RecordingIndexer(),
+        )
+        pipeline.run(submission.job.id)
+        cached = store.read_json(submission.document.id, submission.version.sha256, "document.json")
+        cached["version_id"] = "docver_from_old_pipeline"
+        store.write_json(submission.document.id, submission.version.sha256, "document.json", cached)
+        db.query(KnowledgeChunk).delete()
+        db.commit()
+
+        pipeline.run(submission.job.id)
+
+        assert parser.calls == 2
+        assert store.read_json(
+            submission.document.id,
+            submission.version.sha256,
+            "document.json",
+        )["version_id"] == submission.version.id
+        assert repository.version_chunks(submission.version.id)
+    engine.dispose()
+
+
+def test_pipeline_rolls_back_failed_transaction_before_recording_failure(tmp_path):
+    repository = FailingRepository()
+    pipeline = IngestionPipeline(
+        repository=repository,
+        artifact_store=ArtifactStore(tmp_path),
+        parsers={},
+        router=None,
+        ocr_provider=None,
+        vision_provider=None,
+        fusion=None,
+        chunker=None,
+        indexer=None,
+    )
+
+    with pytest.raises(RuntimeError, match="database flush failed"):
+        pipeline.run("job-1")
+
+    assert repository.db.rollback_called is True
+    assert repository.fail_called is True
