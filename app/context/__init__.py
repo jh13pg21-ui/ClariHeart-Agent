@@ -9,6 +9,13 @@ from app.context.tokens import (
     TokenizerJsonEstimator,
     calculate_input_budget,
 )
+from app.context.contracts import (
+    CompactionAction,
+    ContextEnvelope,
+    ContextPlan,
+    ContextSection,
+)
+from app.context.planner import ContextPlanner, ContextPlanningError
 
 __all__ = [
     "ConservativeEstimator",
@@ -18,4 +25,10 @@ __all__ = [
     "TokenEstimatorRegistry",
     "TokenizerJsonEstimator",
     "calculate_input_budget",
+    "CompactionAction",
+    "ContextEnvelope",
+    "ContextPlan",
+    "ContextSection",
+    "ContextPlanner",
+    "ContextPlanningError",
 ]
