@@ -32,7 +32,15 @@ class AdminReadApiTests(unittest.TestCase):
                 must_reset_password=False,
             )
             admin.roles = {"ROLE_ADMIN"}
-            db.add(admin)
+            student = UserAccount(
+                username="student",
+                display_name="Student",
+                password_hash=hash_password("student-password"),
+                password_algorithm="argon2id",
+                must_reset_password=False,
+            )
+            student.roles = {"ROLE_USER"}
+            db.add_all([admin, student])
             db.flush()
             db.add(ChatSession(public_id="session-ok", title="Test", user_id=admin.id))
             db.commit()
@@ -67,9 +75,20 @@ class AdminReadApiTests(unittest.TestCase):
             json={"username": "admin", "password": "admin-password"},
         )
         self.assertEqual(response.status_code, 200, response.text)
+        self.student_client = TestClient(
+            self.app,
+            base_url="https://testserver",
+            raise_server_exceptions=False,
+        )
+        response = self.student_client.post(
+            "/api/auth/login",
+            json={"username": "student", "password": "student-password"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
 
     def tearDown(self):
         self.client.close()
+        self.student_client.close()
         Base.metadata.drop_all(self.engine)
         self.engine.dispose()
 
@@ -78,6 +97,11 @@ class AdminReadApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/admin/agent-traces").status_code, 200)
         self.assertEqual(self.client.get("/api/admin/tool-audits").status_code, 200)
         self.assertEqual(self.client.get("/api/admin/outbox-events").status_code, 200)
+        self.assertEqual(self.client.get("/api/admin/runtime-metrics").status_code, 200)
+        self.assertEqual(
+            self.student_client.get("/api/admin/runtime-metrics").status_code,
+            403,
+        )
 
     def test_conversation_read_audits_success_not_found_and_error_without_content(self):
         self.assertEqual(self.client.get("/api/admin/conversations/session-ok").status_code, 200)

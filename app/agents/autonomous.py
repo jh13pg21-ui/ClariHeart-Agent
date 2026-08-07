@@ -43,6 +43,7 @@ from app.services.output_safety import (
     safe_fallback,
     pop_reviewable_stream_segments,
 )
+from app.services.runtime_metrics import get_runtime_metrics
 
 if TYPE_CHECKING:
     from app.models.entities import ChatSession, UserAccount
@@ -976,6 +977,13 @@ class ResponseAgent(BaseAutonomousAgent):
             CompactionEngine(planner).reactive_plan(envelope, capabilities)
             if reactive
             else planner.plan(envelope, capabilities, requested_output)
+        )
+        get_runtime_metrics().record_context_plan(
+            provider=capabilities.provider,
+            model=capabilities.model,
+            tokens_before=plan.tokens_before,
+            tokens_after=plan.tokens_after,
+            actions=[(action.layer, action.action) for action in plan.actions],
         )
         assembled = PromptAssembler(registry, estimator).assemble(
             PromptRequest(

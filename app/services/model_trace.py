@@ -46,6 +46,18 @@ class NullModelTraceSink:
         return None
 
 
+class CompositeModelTraceSink:
+    def __init__(self, *sinks: ModelTraceSink) -> None:
+        self.sinks = tuple(sinks)
+
+    def record(self, event: ModelTraceEvent | Mapping[str, Any]) -> None:
+        for sink in self.sinks:
+            try:
+                sink.record(event)
+            except Exception:
+                continue
+
+
 class SqlModelTraceSink:
     """数据库实现使用正向字段白名单，未知字段永远不会落库。"""
 

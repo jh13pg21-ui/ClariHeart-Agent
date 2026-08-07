@@ -30,6 +30,7 @@ from app.services.memory import RedisShortTermMemoryStore
 from app.services.privacy_retention import PrivacyRetentionService
 from app.services.tool_governance import ToolGovernanceService
 from app.services.tools import ToolOrchestrationService
+from app.services.runtime_metrics import get_runtime_metrics
 from app.workers.celery_app import celery_app
 
 
@@ -128,6 +129,7 @@ def extract_long_term_memory(
                 f"memory.consolidate:{consolidation_run.public_id}",
             )
         db.commit()
+        get_runtime_metrics().record_memory("extraction", "success", len(stored))
         return {
             "status": "SUCCESS",
             "eventId": event_id,
@@ -189,6 +191,11 @@ def consolidate_long_term_memory(
             db.rollback()
             raise RetryableTaskError(result.error or "记忆整合暂时失败")
         db.commit()
+        get_runtime_metrics().record_memory(
+            "consolidation",
+            result.status.lower(),
+            1,
+        )
         return {
             "status": result.status,
             "eventId": event_id,

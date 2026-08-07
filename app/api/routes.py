@@ -26,6 +26,7 @@ from app.services.report import ReportService
 from app.services.security_audit import SecurityAuditService
 from app.services.skills import MindBridgeSkillLibrary
 from app.services.tools import ToolOrchestrationService
+from app.services.runtime_metrics import get_runtime_metrics
 
 router = APIRouter()
 
@@ -319,6 +320,13 @@ def admin_agent_traces(_: Annotated[UserAccount, Depends(require_admin)], db: An
 @router.get("/api/admin/tool-audits")
 def admin_tool_audits(_: Annotated[UserAccount, Depends(require_admin)], db: Annotated[Session, Depends(get_db)]):
     return ReportService(db).tool_audits()
+
+
+@router.get("/api/admin/runtime-metrics")
+def admin_runtime_metrics(
+    _: Annotated[UserAccount, Depends(require_admin)],
+):
+    return get_runtime_metrics().snapshot()
 
 
 @router.get("/api/admin/conversations/{session_id}")
