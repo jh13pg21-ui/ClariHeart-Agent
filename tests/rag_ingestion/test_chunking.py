@@ -21,14 +21,23 @@ from app.rag_ingestion.schema import (
 )
 
 
-def block(block_id, order, text, *, block_type=BlockType.PARAGRAPH, table=None, searchable=True):
+def block(
+    block_id,
+    order,
+    text,
+    *,
+    block_type=BlockType.PARAGRAPH,
+    table=None,
+    searchable=True,
+    section_path=None,
+):
     return CanonicalBlock(
         block_id=block_id,
         type=block_type,
         reading_order=order,
         bbox_norm=[0.1, 0.1 + order * 0.1, 0.9, 0.18 + order * 0.1],
         text=text,
-        section_path=["压力管理", "日常练习"],
+        section_path=["压力管理", "日常练习"] if section_path is None else section_path,
         searchable=searchable,
         confidence=0.95,
         provenance=[EvidenceProvenance(provider="native")],
@@ -83,6 +92,25 @@ def test_chunker_builds_stable_parent_child_relationships_and_skips_headers():
     assert [item.stable_id for item in first] == [item.stable_id for item in second]
 
 
+def test_single_child_does_not_store_an_identical_parent():
+    chunks = StructureAwareChunker().chunk(
+        document([block("cover", 0, "大学生心理健康知识手册")])
+    )
+
+    assert [item.chunk_kind for item in chunks] == [ChunkKind.CHILD]
+    assert chunks[0].parent_stable_id is None
+    assert chunks[0].source_index == 0
+
+
+def test_missing_section_falls_back_to_document_title_without_placeholder():
+    chunks = StructureAwareChunker().chunk(
+        document([block("cover", 0, "深圳大学心理辅导中心", section_path=[])])
+    )
+
+    assert chunks[0].content == "[章节] guide\n[页码] 1\n深圳大学心理辅导中心"
+    assert "未命名章节" not in chunks[0].content
+
+
 def test_long_table_splits_by_complete_rows_and_repeats_header():
     cells = [TableCell(row=0, column=0, text="姓名"), TableCell(row=0, column=1, text="处理方式")]
     for row in range(1, 41):
@@ -134,7 +162,13 @@ def test_parent_target_tokens_creates_context_sized_parent_groups():
     parents = [
         item
         for item in StructureAwareChunker(
-            ChunkingConfig(parent_target_tokens=40, parent_max_tokens=100)
+            ChunkingConfig(
+                child_target_tokens=10,
+                child_min_tokens=1,
+                child_max_tokens=15,
+                parent_target_tokens=40,
+                parent_max_tokens=100,
+            )
         ).chunk(doc)
         if item.chunk_kind == ChunkKind.PARENT
     ]

@@ -272,9 +272,9 @@ class SourceInfo(StrictModel):
 
 
 class ParserRunInfo(StrictModel):
-    pipeline_version: str = "rag-ingestion-v1"
+    pipeline_version: str = "rag-ingestion-v2"
     router_version: str = "page-router-v1"
-    chunker_version: str = "structure-chunker-v1"
+    chunker_version: str = "structure-chunker-v2"
     liteparse_version: str = ""
     ocr_provider: str = "paddleocr"
     ocr_model: str = ""

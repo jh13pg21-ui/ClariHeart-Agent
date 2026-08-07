@@ -71,7 +71,7 @@ class Settings(BaseSettings):
     rag_ingestion_max_file_size_bytes: int = 52_428_800
     rag_ingestion_max_pages: int = 500
     rag_ingestion_max_attempts: int = 3
-    rag_pipeline_fingerprint: str = "rag-v1"
+    rag_pipeline_fingerprint: str = "rag-v2"
     rag_artifact_dir: str = "data/knowledge-artifacts"
     rag_artifact_temp_retention_hours: int = 24
     rag_parser_provider: str = "liteparse"

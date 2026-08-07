@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from difflib import SequenceMatcher
+import re
 
 from app.rag_ingestion.ids import stable_block_id
 from app.rag_ingestion.schema import (
@@ -67,7 +68,7 @@ class PageEvidenceFusion:
                 if route.text_strategy == TextStrategy.HYBRID and any(self._iou(bbox, block.bbox_norm) >= 0.2 for block in result):
                     continue
                 result.append(self._from_ocr(version_id, page.page_number, line, len(result)))
-        return result
+        return self._classify_local_non_content(result)
 
     def _vision_blocks(
         self,
@@ -148,6 +149,7 @@ class PageEvidenceFusion:
         return visual.text, min(visual.confidence, 0.5), provenance
 
     def _from_native(self, version_id: str, page: PageEvidence, item: EvidenceBlock, order: int) -> CanonicalBlock:
+        searchable = item.type not in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER}
         return CanonicalBlock(
             block_id=stable_block_id(version_id, page.page_number, order, item.text),
             type=item.type,
@@ -156,6 +158,7 @@ class PageEvidenceFusion:
             text=item.text,
             section_path=item.section_path,
             confidence=item.confidence,
+            searchable=searchable,
             provenance=[
                 EvidenceProvenance(
                     provider="native",
@@ -176,6 +179,54 @@ class PageEvidenceFusion:
             text=line.text,
             confidence=line.confidence,
             provenance=[EvidenceProvenance(provider="paddleocr", bbox_norm=bbox, confidence=line.confidence)],
+        )
+
+    @classmethod
+    def _classify_local_non_content(cls, blocks: list[CanonicalBlock]) -> list[CanonicalBlock]:
+        has_print_timestamp = any(
+            block.bbox_norm[1] < 0.05 and cls._is_print_timestamp(block.text)
+            for block in blocks
+        )
+        result: list[CanonicalBlock] = []
+        for block in blocks:
+            block_type = block.type
+            searchable = block.searchable
+            top, bottom = block.bbox_norm[1], block.bbox_norm[3]
+            if block_type in {BlockType.HEADER, BlockType.FOOTER, BlockType.PAGE_NUMBER}:
+                searchable = False
+            elif has_print_timestamp and top < 0.05 and bottom <= 0.07:
+                block_type = BlockType.HEADER
+                searchable = False
+            elif top >= 0.94 and cls._is_url(block.text):
+                block_type = BlockType.FOOTER
+                searchable = False
+            elif (top >= 0.9 or bottom <= 0.08) and cls._is_page_number(block.text):
+                block_type = BlockType.PAGE_NUMBER
+                searchable = False
+            result.append(block.model_copy(update={"type": block_type, "searchable": searchable}))
+        return result
+
+    @staticmethod
+    def _is_print_timestamp(text: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"\s*\d{4}[/-]\d{1,2}[/-]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?\s*",
+                text,
+            )
+        )
+
+    @staticmethod
+    def _is_url(text: str) -> bool:
+        return bool(re.match(r"\s*https?://", text, flags=re.IGNORECASE))
+
+    @staticmethod
+    def _is_page_number(text: str) -> bool:
+        return bool(
+            re.fullmatch(
+                r"\s*(?:\d+\s*/\s*\d+|(?:page|第)\s*\d+\s*(?:页)?|[ivxlcdm]+)\s*",
+                text,
+                flags=re.IGNORECASE,
+            )
         )
 
     def _best_native(self, visual: VisionBlock, blocks: list[EvidenceBlock]) -> EvidenceBlock | None:

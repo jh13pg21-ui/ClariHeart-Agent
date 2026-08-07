@@ -115,3 +115,91 @@ def test_vision_only_fallback_remains_searchable_when_ocr_is_disabled():
     assert page.blocks[0].searchable is True
     assert page.blocks[0].text == "人物正在练习缓慢呼吸。"
     assert [item.provider for item in page.blocks[0].provenance] == ["vision"]
+
+
+def test_local_fusion_excludes_browser_print_chrome_from_searchable_content():
+    source = PageEvidence(
+        page_number=2,
+        geometry=PageGeometry(width_px=1240, height_px=1754),
+        image_path="page.png",
+        native_blocks=[
+            EvidenceBlock(
+                evidence_id="timestamp",
+                type=BlockType.PARAGRAPH,
+                bbox_norm=[0.04, 0.018, 0.13, 0.029],
+                text="2026/8/6 21:44",
+            ),
+            EvidenceBlock(
+                evidence_id="browser-title",
+                type=BlockType.PARAGRAPH,
+                bbox_norm=[0.34, 0.019, 0.80, 0.031],
+                text="关于印发实施方案的通知",
+            ),
+            EvidenceBlock(
+                evidence_id="body",
+                type=BlockType.PARAGRAPH,
+                bbox_norm=[0.12, 0.18, 0.89, 0.22],
+                text="健全社会心理服务体系和危机干预机制实施方案",
+            ),
+            EvidenceBlock(
+                evidence_id="url",
+                type=BlockType.PARAGRAPH,
+                bbox_norm=[0.04, 0.972, 0.80, 0.983],
+                text="https://example.com/policy",
+            ),
+            EvidenceBlock(
+                evidence_id="page-number",
+                type=BlockType.PARAGRAPH,
+                bbox_norm=[0.93, 0.972, 0.96, 0.983],
+                text="2/7",
+            ),
+        ],
+        features=PageFeatures(native_text_score=1.0),
+    )
+
+    page = PageEvidenceFusion().fuse(
+        "docver_1",
+        source,
+        PageRoute(text_strategy=TextStrategy.NATIVE, structure_strategy=StructureStrategy.LOCAL),
+    )
+
+    searchable = [block.text for block in page.blocks if block.searchable]
+    assert searchable == ["健全社会心理服务体系和危机干预机制实施方案"]
+    assert [block.type for block in page.blocks] == [
+        BlockType.HEADER,
+        BlockType.HEADER,
+        BlockType.PARAGRAPH,
+        BlockType.FOOTER,
+        BlockType.PAGE_NUMBER,
+    ]
+
+
+def test_local_fusion_respects_explicit_non_content_block_types():
+    source = PageEvidence(
+        page_number=1,
+        geometry=PageGeometry(width_px=1000, height_px=1400),
+        image_path="page.png",
+        native_blocks=[
+            EvidenceBlock(
+                evidence_id="header",
+                type=BlockType.HEADER,
+                bbox_norm=[0.1, 0.1, 0.9, 0.2],
+                text="重复页眉",
+            ),
+            EvidenceBlock(
+                evidence_id="body",
+                type=BlockType.PARAGRAPH,
+                bbox_norm=[0.1, 0.3, 0.9, 0.4],
+                text="正文",
+            ),
+        ],
+        features=PageFeatures(native_text_score=1.0),
+    )
+
+    page = PageEvidenceFusion().fuse(
+        "docver_1",
+        source,
+        PageRoute(text_strategy=TextStrategy.NATIVE, structure_strategy=StructureStrategy.LOCAL),
+    )
+
+    assert [block.searchable for block in page.blocks] == [False, True]

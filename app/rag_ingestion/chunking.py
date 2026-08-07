@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.rag_ingestion.ids import stable_chunk_id
 from app.rag_ingestion.schema import (
@@ -47,34 +48,37 @@ class StructureAwareChunker:
         drafts: list[ChunkDraft] = []
         source_index = 0
         for refs in groups:
-            parent_content = self._parent_content(refs)
+            parent_content = self._parent_content(document, refs)
+            child_contents = self._child_contents(document, refs)
             block_ids = [ref.block.block_id for ref in refs]
             page_start = min(ref.page_number for ref in refs)
             page_end = max(ref.page_number for ref in refs)
             section_path = refs[0].block.section_path
-            parent_id = stable_chunk_id(
-                document.document_id,
-                document.version_id,
-                ChunkKind.PARENT.value,
-                block_ids,
-                parent_content,
-            )
-            drafts.append(
-                self._draft(
-                    document,
-                    parent_id,
-                    None,
-                    ChunkKind.PARENT,
-                    source_index,
-                    parent_content,
-                    page_start,
-                    page_end,
-                    section_path,
+            parent_id = None
+            if len(child_contents) > 1:
+                parent_id = stable_chunk_id(
+                    document.document_id,
+                    document.version_id,
+                    ChunkKind.PARENT.value,
                     block_ids,
+                    parent_content,
                 )
-            )
-            source_index += 1
-            for content, child_refs in self._child_contents(refs):
+                drafts.append(
+                    self._draft(
+                        document,
+                        parent_id,
+                        None,
+                        ChunkKind.PARENT,
+                        source_index,
+                        parent_content,
+                        page_start,
+                        page_end,
+                        section_path,
+                        block_ids,
+                    )
+                )
+                source_index += 1
+            for content, child_refs in child_contents:
                 child_block_ids = list(dict.fromkeys(ref.block.block_id for ref in child_refs))
                 child_page_start = min(ref.page_number for ref in child_refs)
                 child_page_end = max(ref.page_number for ref in child_refs)
@@ -121,7 +125,7 @@ class StructureAwareChunker:
                     groups.append([ref])
                     current_key = None
                     continue
-                projected = self._parent_content([*current, ref]) if current else block.text
+                projected = self._parent_content(document, [*current, ref]) if current else block.text
                 if current and (
                     key != current_key
                     or estimate_tokens(projected) > parent_target
@@ -135,18 +139,22 @@ class StructureAwareChunker:
             groups.append(current)
         return groups
 
-    def _parent_content(self, refs: list[_BlockRef]) -> str:
-        prefix = self._prefix(refs)
+    def _parent_content(self, document: CanonicalDocument, refs: list[_BlockRef]) -> str:
+        prefix = self._prefix(document, refs)
         body = "\n\n".join(ref.block.text.strip() for ref in refs if ref.block.text.strip())
         return f"{prefix}\n{body}".strip()
 
-    def _child_contents(self, refs: list[_BlockRef]) -> list[tuple[str, list[_BlockRef]]]:
+    def _child_contents(
+        self,
+        document: CanonicalDocument,
+        refs: list[_BlockRef],
+    ) -> list[tuple[str, list[_BlockRef]]]:
         if len(refs) == 1 and refs[0].block.type == BlockType.TABLE and refs[0].block.table:
-            return [(content, refs) for content in self._table_chunks(refs[0])]
+            return [(content, refs) for content in self._table_chunks(document, refs[0])]
         if len(refs) == 1 and refs[0].block.type in {BlockType.FIGURE, BlockType.COMIC_PANEL}:
-            return [(self._parent_content(refs), refs)]
+            return [(self._parent_content(document, refs), refs)]
 
-        prefix = self._prefix(refs)
+        prefix = self._prefix(document, refs)
         prefix_tokens = estimate_tokens(prefix)
         max_body_tokens = max(1, self.config.child_max_tokens - prefix_tokens)
         target_body_tokens = max(
@@ -273,14 +281,14 @@ class StructureAwareChunker:
             candidate = projected
         return candidate.strip()
 
-    def _table_chunks(self, ref: _BlockRef) -> list[str]:
+    def _table_chunks(self, document: CanonicalDocument, ref: _BlockRef) -> list[str]:
         table = ref.block.table
         assert table is not None
         rows = self._render_table_rows(table)
         if not rows:
-            return [self._parent_content([ref])]
+            return [self._parent_content(document, [ref])]
         header = rows[0]
-        prefix = self._prefix([ref])
+        prefix = self._prefix(document, [ref])
         fixed_tokens = estimate_tokens(prefix) + estimate_tokens(header) + 2
         budget = max(1, self.config.child_max_tokens - fixed_tokens)
         chunks: list[str] = []
@@ -341,10 +349,12 @@ class StructureAwareChunker:
         return pieces
 
     @staticmethod
-    def _prefix(refs: list[_BlockRef]) -> str:
+    def _prefix(document: CanonicalDocument, refs: list[_BlockRef]) -> str:
         pages = sorted({ref.page_number for ref in refs})
         page_label = str(pages[0]) if len(pages) == 1 else f"{pages[0]}-{pages[-1]}"
-        section = " > ".join(refs[0].block.section_path) or "未命名章节"
+        section = " > ".join(refs[0].block.section_path).strip()
+        if not section:
+            section = Path(document.source.filename).stem.strip() or "文档"
         return f"[章节] {section}\n[页码] {page_label}"
 
     @staticmethod
