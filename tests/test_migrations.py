@@ -31,6 +31,8 @@ NEW_TABLES = {
     "knowledge_ingestion_jobs",
     "knowledge_pages",
     "context_compaction_records",
+    "model_call_traces",
+    "memory_consolidation_runs",
 }
 
 
@@ -242,7 +244,7 @@ class MigrationWorkflowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             scalar_sql(self.legacy_url, "SELECT version_num FROM alembic_version"),
-            "0009_context_compaction",
+            "0010_memory_v2_traces",
         )
 
     def test_unknown_or_incomplete_legacy_schema_is_rejected(self):

@@ -95,6 +95,16 @@ class ConversationMemorySummary(Base):
     last_error: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    scheduled_through_message_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        index=True,
+    )
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    prompt_release: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    refresh_reason: Mapped[str] = mapped_column(String(64), default="", server_default="")
 
     session: Mapped[ChatSession] = relationship(back_populates="conversation_summary")
 
@@ -106,6 +116,12 @@ class LongTermMemory(Base):
             "user_id",
             "content_hash",
             name="uq_long_term_memories_user_content_hash",
+        ),
+        Index(
+            "ix_long_term_memories_user_status_updated",
+            "user_id",
+            "status",
+            "updated_at",
         ),
     )
 
@@ -130,6 +146,36 @@ class LongTermMemory(Base):
     last_accessed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime,
         nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default="ACTIVE",
+        server_default="ACTIVE",
+        index=True,
+    )
+    evidence_message_ids_json: Mapped[str] = mapped_column(
+        Text,
+        default="[]",
+        server_default="[]",
+    )
+    confidence: Mapped[float] = mapped_column(Float, default=0.5, server_default="0.5")
+    extraction_method: Mapped[str] = mapped_column(
+        String(32),
+        default="legacy",
+        server_default="legacy",
+    )
+    prompt_version: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    model_provider: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    model_name: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    usage_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    confirmation_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    supersedes_memory_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("long_term_memories.id"),
+        nullable=True,
+        index=True,
     )
 
 
@@ -371,6 +417,69 @@ class ContextCompactionRecord(Base):
     status: Mapped[str] = mapped_column(String(32), index=True)
     manifest_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class ModelCallTrace(Base):
+    __tablename__ = "model_call_traces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        nullable=True,
+        index=True,
+    )
+    session_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("chat_sessions.id"),
+        nullable=True,
+        index=True,
+    )
+    agent_name: Mapped[str] = mapped_column(String(128), index=True)
+    task_name: Mapped[str] = mapped_column(String(128), index=True)
+    provider: Mapped[str] = mapped_column(String(64), index=True)
+    model: Mapped[str] = mapped_column(String(256))
+    risk_level: Mapped[str] = mapped_column(String(32), default="LOW", server_default="LOW")
+    route: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    error_code: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    prompt_release: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    prompt_manifest_hash: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    context_plan_hash: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    context_section_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    cloud_egress: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class MemoryConsolidationRun(Base):
+    __tablename__ = "memory_consolidation_runs"
+    __table_args__ = (
+        Index(
+            "ix_memory_consolidation_runs_user_status_created",
+            "user_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user_accounts.id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    trigger_reason: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    new_memory_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    modified_session_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    source_memory_ids_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    result_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    last_error: Mapped[str] = mapped_column(Text, default="", server_default="")
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
 class ToolAuditRecord(Base):
