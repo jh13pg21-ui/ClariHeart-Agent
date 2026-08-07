@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     model_openai_tokenizer_kind: str = "tiktoken"
     model_recovery_reserve_tokens: int = 1024
     model_provider_safety_margin_ratio: float = 0.10
+    model_token_estimator_safety_multiplier: float = 1.05
     model_cloud_fallback_enabled: bool = True
     model_recovery_max_transient_retries: int = 2
     model_recovery_max_stream_retries: int = 1
