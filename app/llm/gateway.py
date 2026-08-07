@@ -9,6 +9,7 @@ import time
 from dataclasses import replace
 from typing import Any, Callable, Mapping
 
+from app.llm.capabilities import ModelCapabilitiesRegistry
 from app.llm.contracts import ModelRequest, ModelResult
 from app.llm.egress import CloudEgressPolicy
 from app.llm.errors import ModelError, ModelErrorCode
@@ -41,6 +42,7 @@ class ModelGateway:
         *,
         cloud_provider: str = "openai",
         cloud_model: str = "",
+        capabilities_registry: ModelCapabilitiesRegistry | None = None,
         egress_policy: CloudEgressPolicy | None = None,
         recovery_policy: RecoveryPolicy | None = None,
         sleep: Sleep = asyncio.sleep,
@@ -53,6 +55,7 @@ class ModelGateway:
         }
         self.cloud_provider = str(cloud_provider).strip().lower()
         self.cloud_model = str(cloud_model).strip()
+        self.capabilities_registry = capabilities_registry
         self.egress_policy = egress_policy or CloudEgressPolicy()
         self.recovery_policy = recovery_policy or RecoveryPolicy()
         self._sleep = sleep
@@ -120,6 +123,14 @@ class ModelGateway:
     ) -> ModelResult:
         orchestrator = RecoveryOrchestrator(
             provider,
+            capabilities=(
+                self.capabilities_registry.for_model(
+                    request.preferred_provider,
+                    request.preferred_model,
+                )
+                if self.capabilities_registry is not None
+                else None
+            ),
             policy=self.recovery_policy,
             sleep=self._sleep,
             clock=self._clock,
