@@ -30,7 +30,7 @@ def upgrade() -> None:
 
     with op.batch_alter_table("long_term_memories") as batch:
         batch.add_column(sa.Column("status", sa.String(length=32), server_default="ACTIVE", nullable=False))
-        batch.add_column(sa.Column("evidence_message_ids_json", sa.Text(), server_default="[]", nullable=False))
+        batch.add_column(sa.Column("evidence_message_ids_json", sa.Text(), nullable=True))
         batch.add_column(sa.Column("confidence", sa.Float(), server_default="0.5", nullable=False))
         batch.add_column(sa.Column("extraction_method", sa.String(length=32), server_default="legacy", nullable=False))
         batch.add_column(sa.Column("prompt_version", sa.String(length=64), server_default="", nullable=False))
@@ -59,6 +59,20 @@ def upgrade() -> None:
             "ix_long_term_memories_user_status_updated",
             ["user_id", "status", "updated_at"],
             unique=False,
+        )
+
+    op.execute(
+        sa.text(
+            "UPDATE long_term_memories "
+            "SET evidence_message_ids_json = '[]' "
+            "WHERE evidence_message_ids_json IS NULL"
+        )
+    )
+    with op.batch_alter_table("long_term_memories") as batch:
+        batch.alter_column(
+            "evidence_message_ids_json",
+            existing_type=sa.Text(),
+            nullable=False,
         )
 
     op.create_table(
@@ -102,9 +116,9 @@ def upgrade() -> None:
         sa.Column("trigger_reason", sa.String(length=64), server_default="", nullable=False),
         sa.Column("new_memory_count", sa.Integer(), server_default="0", nullable=False),
         sa.Column("modified_session_count", sa.Integer(), server_default="0", nullable=False),
-        sa.Column("source_memory_ids_json", sa.Text(), server_default="[]", nullable=False),
-        sa.Column("result_json", sa.Text(), server_default="{}", nullable=False),
-        sa.Column("last_error", sa.Text(), server_default="", nullable=False),
+        sa.Column("source_memory_ids_json", sa.Text(), nullable=False),
+        sa.Column("result_json", sa.Text(), nullable=False),
+        sa.Column("last_error", sa.Text(), nullable=False),
         sa.Column("started_at", sa.DateTime(), nullable=True),
         sa.Column("finished_at", sa.DateTime(), nullable=True),
         sa.Column("created_at", sa.DateTime(), nullable=False),

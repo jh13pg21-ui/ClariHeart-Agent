@@ -156,7 +156,6 @@ class LongTermMemory(Base):
     evidence_message_ids_json: Mapped[str] = mapped_column(
         Text,
         default="[]",
-        server_default="[]",
     )
     confidence: Mapped[float] = mapped_column(Float, default=0.5, server_default="0.5")
     extraction_method: Mapped[str] = mapped_column(
@@ -473,9 +472,9 @@ class MemoryConsolidationRun(Base):
     trigger_reason: Mapped[str] = mapped_column(String(64), default="", server_default="")
     new_memory_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     modified_session_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
-    source_memory_ids_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
-    result_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
-    last_error: Mapped[str] = mapped_column(Text, default="", server_default="")
+    source_memory_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    last_error: Mapped[str] = mapped_column(Text, default="")
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
