@@ -8,7 +8,9 @@ from typing import Any, Iterable
 
 from sqlalchemy.orm import Session
 
+from app.context.tokens import ConservativeEstimator
 from app.models.entities import ChatMessage, ChatSession, ConversationMemorySummary
+from app.prompts.release import PROMPT_RELEASE
 from app.schemas.dtos import AiMessage
 from app.services.ai import AiClient
 from app.services.data_protection import SensitiveTextProtector
@@ -148,33 +150,60 @@ class ConversationSummaryService:
     ) -> bool:
         if not getattr(self.settings, "memory_compaction_enabled", True):
             return False
-        recent_count = max(
-            2,
-            int(getattr(self.settings, "memory_compaction_recent_messages", 8)),
-        )
-        refresh_count = max(
-            1,
-            int(getattr(self.settings, "memory_summary_refresh_messages", 4)),
-        )
         try:
             record = (
                 self.db.query(ConversationMemorySummary)
                 .filter(ConversationMemorySummary.session_id == session.id)
                 .first()
             )
-            watermark = record.through_message_id if record else 0
-            pending = (
-                self.db.query(ChatMessage)
-                .filter(
-                    ChatMessage.session_id == session.id,
-                    ChatMessage.id > (watermark or 0),
-                    ChatMessage.id <= assistant_message.id,
-                )
-                .count()
+            if record and int(record.scheduled_through_message_id or 0) > int(
+                record.through_message_id or 0
+            ):
+                return False
+            return self._is_due(
+                session.id,
+                int(record.through_message_id or 0) if record else 0,
+                assistant_message.id,
             )
-            return pending >= recent_count + refresh_count
         except Exception:
             return False
+
+    def reserve_refresh(
+        self,
+        session: ChatSession,
+        assistant_message: ChatMessage,
+    ) -> bool:
+        """在调用方事务内原子预留一个摘要刷新区间。"""
+
+        if not getattr(self.settings, "memory_compaction_enabled", True):
+            return False
+        record = (
+            self.db.query(ConversationMemorySummary)
+            .filter(ConversationMemorySummary.session_id == session.id)
+            .with_for_update()
+            .first()
+        )
+        if record and int(record.scheduled_through_message_id or 0) > int(
+            record.through_message_id or 0
+        ):
+            return False
+        watermark = int(record.through_message_id or 0) if record else 0
+        if not self._is_due(session.id, watermark, assistant_message.id):
+            return False
+        if record is None:
+            record = ConversationMemorySummary(
+                session_id=session.id,
+                schema_version=SUMMARY_SCHEMA_VERSION,
+                summary_json="{}",
+                status="PENDING",
+            )
+        record.scheduled_through_message_id = assistant_message.id
+        record.scheduled_at = datetime.utcnow()
+        record.refresh_reason = "threshold"
+        record.updated_at = datetime.utcnow()
+        self.db.add(record)
+        self.db.flush()
+        return True
 
     async def refresh_for_assistant_message(
         self,
@@ -186,6 +215,21 @@ class ConversationSummaryService:
         session = self.db.get(ChatSession, assistant.session_id)
         if session is None:
             return None
+
+        return await self.ensure_through(
+            session,
+            assistant.id,
+            reason="async_outbox",
+        )
+
+    async def ensure_through(
+        self,
+        session: ChatSession,
+        through_message_id: int,
+        *,
+        reason: str,
+    ) -> ConversationMemorySummary | None:
+        """锁定检查点并单调推进到目标消息可压缩的最大完整批次。"""
 
         record = (
             self.db.query(ConversationMemorySummary)
@@ -203,7 +247,7 @@ class ConversationSummaryService:
             .filter(
                 ChatMessage.session_id == session.id,
                 ChatMessage.id > (watermark or 0),
-                ChatMessage.id <= assistant.id,
+                ChatMessage.id <= through_message_id,
             )
             .order_by(ChatMessage.id.desc())
             .limit(max_source_messages)
@@ -221,12 +265,36 @@ class ConversationSummaryService:
         compactable = len(rows) - recent_count
         compact_count = (compactable // refresh_count) * refresh_count
         if compact_count < refresh_count:
-            return None
+            if record is not None and int(record.scheduled_through_message_id or 0) <= int(
+                through_message_id
+            ):
+                record.scheduled_through_message_id = None
+                record.scheduled_at = None
+                record.updated_at = datetime.utcnow()
+                self.db.add(record)
+                self.db.flush()
+            return record
         source_rows = rows[:compact_count]
         previous = self._summary_from_record(record) if record else StructuredConversationSummary()
         messages = [self._source_message(row) for row in source_rows]
         summary, status, error = await self._generate_or_fallback(previous, messages)
         provider, model = self._model_identity()
+        estimator = ConservativeEstimator()
+        input_tokens = estimator.count(
+            json.dumps(
+                {
+                    "previous": previous.to_dict(),
+                    "messages": messages,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+        output_json = json.dumps(
+            summary.to_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 
         if record is None:
             record = ConversationMemorySummary(
@@ -235,9 +303,7 @@ class ConversationSummaryService:
                 summary_json="{}",
             )
         record.schema_version = SUMMARY_SCHEMA_VERSION
-        record.summary_json = self.protector.protect(
-            json.dumps(summary.to_dict(), ensure_ascii=False, separators=(",", ":"))
-        )
+        record.summary_json = self.protector.protect(output_json)
         record.through_message_id = source_rows[-1].id
         record.source_message_count = int(record.source_message_count or 0) + len(source_rows)
         record.model_provider = provider
@@ -245,10 +311,41 @@ class ConversationSummaryService:
         record.prompt_version = SUMMARY_PROMPT_VERSION
         record.status = status
         record.last_error = self.privacy.sanitize(error)[:1000]
+        record.scheduled_through_message_id = None
+        record.scheduled_at = None
+        record.input_tokens = input_tokens
+        record.output_tokens = estimator.count(output_json)
+        record.prompt_release = PROMPT_RELEASE
+        record.refresh_reason = str(reason or "manual")[:64]
         record.updated_at = datetime.utcnow()
         self.db.add(record)
         self.db.flush()
         return record
+
+    def _is_due(
+        self,
+        session_id: int,
+        watermark: int,
+        through_message_id: int,
+    ) -> bool:
+        recent_count = max(
+            2,
+            int(getattr(self.settings, "memory_compaction_recent_messages", 8)),
+        )
+        refresh_count = max(
+            1,
+            int(getattr(self.settings, "memory_summary_refresh_messages", 4)),
+        )
+        pending = (
+            self.db.query(ChatMessage)
+            .filter(
+                ChatMessage.session_id == session_id,
+                ChatMessage.id > int(watermark or 0),
+                ChatMessage.id <= through_message_id,
+            )
+            .count()
+        )
+        return pending >= recent_count + refresh_count
 
     def load_prompt_history(
         self,

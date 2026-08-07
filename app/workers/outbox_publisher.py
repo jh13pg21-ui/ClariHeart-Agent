@@ -9,7 +9,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
 from app.core.database import SessionLocal
-from app.models.entities import KnowledgeDocumentVersion, KnowledgeIngestionJob, OutboxEvent
+from app.models.entities import (
+    ChatMessage,
+    ConversationMemorySummary,
+    KnowledgeDocumentVersion,
+    KnowledgeIngestionJob,
+    OutboxEvent,
+)
 from app.workers.celery_app import celery_app
 
 
@@ -107,7 +113,7 @@ class OutboxPublisher:
                         ),
                     ):
                         event.status = "DEAD"
-                        self._mark_ingestion_publish_failure(db, event)
+                        self._mark_terminal_publish_failure(db, event)
                     else:
                         event.available_at = datetime.utcnow() + timedelta(
                             seconds=min(300, 2 ** event.attempts)
@@ -128,7 +134,25 @@ class OutboxPublisher:
             db.close()
 
     @staticmethod
-    def _mark_ingestion_publish_failure(db: Session, event: OutboxEvent) -> None:
+    def _mark_terminal_publish_failure(db: Session, event: OutboxEvent) -> None:
+        if event.event_type == "memory.summary.refresh":
+            message = db.get(ChatMessage, int(event.aggregate_id))
+            if message is None:
+                return
+            record = (
+                db.query(ConversationMemorySummary)
+                .filter(ConversationMemorySummary.session_id == message.session_id)
+                .first()
+            )
+            if record is not None and int(
+                record.scheduled_through_message_id or 0
+            ) <= int(message.id):
+                record.scheduled_through_message_id = None
+                record.scheduled_at = None
+                record.last_error = "摘要刷新事件投递失败，已释放调度水位线"
+                record.updated_at = datetime.utcnow()
+                db.add(record)
+            return
         if event.event_type != "knowledge.ingest":
             return
         job = db.get(KnowledgeIngestionJob, event.aggregate_id)

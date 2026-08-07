@@ -9,10 +9,14 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
 from app.models.entities import (
+    ChatMessage,
+    ChatSession,
+    ConversationMemorySummary,
     KnowledgeDocument,
     KnowledgeDocumentVersion,
     KnowledgeIngestionJob,
     OutboxEvent,
+    UserAccount,
 )
 from app.services.outbox import OutboxService
 from app.workers.outbox_publisher import CeleryBroker, OutboxPublisher
@@ -97,6 +101,59 @@ class OutboxPublisherTests(unittest.TestCase):
         self.assertEqual(event.status, "DEAD")
         self.assertEqual(event.attempts, 1)
         self.assertIn("broker unavailable", event.last_error)
+        db.close()
+
+    def test_dead_summary_publish_releases_scheduled_watermark(self):
+        db = self.Session()
+        user = UserAccount(
+            username="summary-user",
+            display_name="学生",
+            password_hash="hash",
+        )
+        db.add(user)
+        db.flush()
+        session = ChatSession(
+            public_id="summary-session",
+            user_id=user.id,
+            title="摘要",
+        )
+        db.add(session)
+        db.flush()
+        message = ChatMessage(
+            user_id=user.id,
+            session_id=session.id,
+            role="ASSISTANT",
+            content="回复",
+        )
+        db.add(message)
+        db.flush()
+        record = ConversationMemorySummary(
+            session_id=session.id,
+            summary_json="{}",
+            scheduled_through_message_id=message.id,
+            status="PENDING",
+        )
+        db.add(record)
+        OutboxService.add_event(
+            db,
+            "memory.summary.refresh",
+            "chat_message",
+            message.id,
+            {"riskLevel": None},
+            f"memory.summary.refresh:{message.id}",
+        )
+        db.commit()
+        db.close()
+
+        OutboxPublisher(
+            self.Session,
+            FakeBroker(RuntimeError("broker unavailable"), max_attempts=1),
+        ).publish_batch(10)
+
+        db = self.Session()
+        loaded = db.query(ConversationMemorySummary).one()
+        self.assertIsNone(loaded.scheduled_through_message_id)
+        self.assertIsNone(loaded.scheduled_at)
         db.close()
 
     def test_knowledge_ingestion_event_targets_dedicated_queue_with_job_id(self):

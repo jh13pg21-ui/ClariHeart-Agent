@@ -69,6 +69,26 @@ class MemoryCompactionTests(unittest.TestCase):
 
         self.assertLessEqual(len(brief), 80)
 
+    def test_saturated_summary_keeps_newest_information(self):
+        summary_settings = settings(
+            memory_compaction_recent_messages=2,
+            memory_summary_refresh_messages=1,
+            memory_summary_max_chars=120,
+        )
+        state = ConversationSummaryState(
+            "很早以前的背景" * 30,
+            (
+                AiMessage(role="user", content="新的重要事项：明天参加后端面试"),
+                AiMessage(role="assistant", content="旧回复"),
+                AiMessage(role="assistant", content="旧回复二"),
+            ),
+        )
+
+        advanced = state.advance([], summary_settings)
+
+        self.assertLessEqual(len(advanced.summary), 120)
+        self.assertIn("明天参加后端面试", advanced.summary)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -142,7 +142,7 @@ class MindBridgeAgentHarness:
         if ConversationSummaryService(
             self.db,
             self.settings,
-        ).should_schedule_refresh(session, message):
+        ).reserve_refresh(session, message):
             OutboxService.add_event(
                 self.db,
                 "memory.summary.refresh",

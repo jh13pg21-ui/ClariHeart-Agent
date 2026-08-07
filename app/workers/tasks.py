@@ -161,7 +161,11 @@ def refresh_conversation_summary(
         )
         try:
             record = asyncio.run(
-                service.refresh_for_assistant_message(assistant_message_id)
+                service.ensure_through(
+                    message.session,
+                    assistant_message_id,
+                    reason="async_outbox",
+                )
             )
             db.commit()
         except Exception as exc:

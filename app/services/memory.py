@@ -79,7 +79,17 @@ def _merge_summary(existing: str, messages: list[AiMessage], max_chars: int) -> 
     addition = summarize_history_for_memory(messages, max_chars=max_chars)
     if not existing:
         return addition
-    return _clip(f"{existing}\n{addition}", max_chars)
+    if not addition:
+        return _clip(existing, max_chars)
+    newest_budget = max(1, max_chars // 2)
+    bounded_addition = _clip(addition, newest_budget)
+    old_budget = max(0, max_chars - len(bounded_addition) - 1)
+    if old_budget <= 0:
+        return bounded_addition[-max_chars:]
+    old_tail = " ".join(existing.split())[-old_budget:]
+    if len(old_tail) < len(" ".join(existing.split())) and old_budget >= 3:
+        old_tail = "..." + old_tail[3:]
+    return f"{old_tail}\n{bounded_addition}"[-max_chars:]
 
 
 def _new_messages_after_tail(history: list[AiMessage], tail: tuple[AiMessage, ...]) -> list[AiMessage] | None:
