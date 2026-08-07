@@ -16,6 +16,7 @@ from app.context.contracts import (
     ContextSection,
 )
 from app.context.planner import ContextPlanner, ContextPlanningError
+from app.context.section_compactor import SectionCompactor, SectionCompactionError
 
 __all__ = [
     "ConservativeEstimator",
@@ -31,4 +32,6 @@ __all__ = [
     "ContextSection",
     "ContextPlanner",
     "ContextPlanningError",
+    "SectionCompactor",
+    "SectionCompactionError",
 ]
