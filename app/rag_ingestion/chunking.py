@@ -111,14 +111,19 @@ class StructureAwareChunker:
         current: list[_BlockRef] = []
         current_key: tuple[str, ...] | None = None
         parent_target = max(1, min(self.config.parent_target_tokens, self.config.parent_max_tokens))
-        special = {BlockType.TABLE, BlockType.FIGURE, BlockType.COMIC_PANEL}
+        visual = {BlockType.FIGURE, BlockType.COMIC_PANEL}
         for page in document.pages:
             for block in sorted(page.blocks, key=lambda item: item.reading_order):
                 if not block.searchable or not block.text.strip():
                     continue
                 ref = _BlockRef(page.page_number, block)
                 key = tuple(block.section_path)
-                if block.type in special:
+                visual_content = self._parent_content(document, [ref])
+                should_isolate = block.type == BlockType.TABLE or (
+                    block.type in visual
+                    and estimate_tokens(visual_content) >= self.config.child_min_tokens
+                )
+                if should_isolate:
                     if current:
                         groups.append(current)
                         current = []

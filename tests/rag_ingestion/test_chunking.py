@@ -222,3 +222,36 @@ def test_child_min_tokens_merges_small_tail_when_maximum_allows_it():
     assert len(children) == 2
     assert "tiny end" in children[-1].content
     assert all(20 <= estimate_tokens(item.content) <= 27 for item in children)
+
+
+def test_short_visual_labels_merge_with_neighboring_narrative_blocks():
+    doc = document(
+        [
+            block("title", 0, "overall action goals", section_path=[]),
+            block("figure-1", 1, "hospital", block_type=BlockType.FIGURE, section_path=[]),
+            block("figure-2", 2, "media", block_type=BlockType.FIGURE, section_path=[]),
+            block(
+                "body",
+                3,
+                "schools communities families media and hospitals provide coordinated services",
+                section_path=[],
+            ),
+        ]
+    )
+
+    children = [
+        item
+        for item in StructureAwareChunker(
+            ChunkingConfig(
+                child_target_tokens=60,
+                child_min_tokens=20,
+                child_max_tokens=80,
+                child_overlap_tokens=0,
+            )
+        ).chunk(doc)
+        if item.chunk_kind == ChunkKind.CHILD
+    ]
+
+    assert len(children) == 1
+    assert "hospital\nmedia\n" in children[0].content
+    assert children[0].block_ids == ["title", "figure-1", "figure-2", "body"]
