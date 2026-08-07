@@ -19,6 +19,7 @@ class ContextSection:
     sensitivity: RiskLevel = RiskLevel.LOW
     provenance_ids: tuple[str, ...] = ()
     loading_reason: str = ""
+    message_role: str = ""
     token_count: int = 0
     compaction_level: int = 0
 
@@ -29,6 +30,8 @@ class ContextSection:
             raise ValueError("ContextSection.category 不能为空")
         if not 0 <= self.priority <= 100:
             raise ValueError("ContextSection.priority 必须位于 [0, 100]")
+        if self.message_role and self.message_role not in {"system", "user", "assistant"}:
+            raise ValueError("ContextSection.message_role 非法")
 
     @property
     def content_hash(self) -> str:
