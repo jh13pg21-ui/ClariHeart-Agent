@@ -119,3 +119,72 @@ def test_sentence_split_respects_chinese_boundaries_and_maximum():
     assert len(children) > 1
     assert all(item.content.rstrip().endswith("。") for item in children)
     assert all(estimate_tokens(item.content) <= 60 for item in children)
+
+
+def test_parent_target_tokens_creates_context_sized_parent_groups():
+    paragraph = " ".join(f"word{index}" for index in range(20))
+    doc = document(
+        [
+            block("b1", 0, paragraph),
+            block("b2", 1, paragraph),
+            block("b3", 2, paragraph),
+        ]
+    )
+
+    parents = [
+        item
+        for item in StructureAwareChunker(
+            ChunkingConfig(parent_target_tokens=40, parent_max_tokens=100)
+        ).chunk(doc)
+        if item.chunk_kind == ChunkKind.PARENT
+    ]
+
+    assert len(parents) == 3
+
+
+def test_child_overlap_repeats_previous_tail_without_exceeding_maximum():
+    text = (
+        "one two three four five six seven eight nine ten; "
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa; "
+        "tiny end;"
+    )
+    children = [
+        item
+        for item in StructureAwareChunker(
+            ChunkingConfig(
+                child_target_tokens=20,
+                child_min_tokens=1,
+                child_max_tokens=30,
+                child_overlap_tokens=4,
+            )
+        ).chunk(document([block("b1", 0, text)]))
+        if item.chunk_kind == ChunkKind.CHILD
+    ]
+
+    assert len(children) >= 2
+    assert "nine ten" in children[1].content
+    assert all(estimate_tokens(item.content) <= 30 for item in children)
+
+
+def test_child_min_tokens_merges_small_tail_when_maximum_allows_it():
+    text = (
+        "one two three four five six seven eight nine ten; "
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa; "
+        "tiny end;"
+    )
+    children = [
+        item
+        for item in StructureAwareChunker(
+            ChunkingConfig(
+                child_target_tokens=20,
+                child_min_tokens=20,
+                child_max_tokens=27,
+                child_overlap_tokens=0,
+            )
+        ).chunk(document([block("b1", 0, text)]))
+        if item.chunk_kind == ChunkKind.CHILD
+    ]
+
+    assert len(children) == 2
+    assert "tiny end" in children[-1].content
+    assert all(20 <= estimate_tokens(item.content) <= 27 for item in children)

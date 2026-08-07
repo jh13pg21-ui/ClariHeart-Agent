@@ -34,19 +34,23 @@ def build_ingestion_pipeline(db: Session, settings: Settings) -> IngestionPipeli
         "application/pdf": LiteParseDocumentParser(
             artifact_store,
             dpi=settings.rag_page_render_dpi,
+            ocr_enabled=settings.rag_liteparse_ocr_enabled,
         ),
         "text/plain": text_parser,
         "text/markdown": text_parser,
     }
-    if settings.rag_ocr_provider != "paddleocr":
+    if settings.rag_ocr_enabled and settings.rag_ocr_provider != "paddleocr":
         raise ValueError(f"Unsupported OCR provider: {settings.rag_ocr_provider}")
-    if settings.rag_vision_provider != "openai_compatible":
+    if settings.rag_vision_enabled and settings.rag_vision_provider != "openai_compatible":
         raise ValueError(f"Unsupported Vision provider: {settings.rag_vision_provider}")
     return IngestionPipeline(
         repository=KnowledgeIngestionRepository(db),
         artifact_store=artifact_store,
         parsers=parsers,
-        router=PageRouter(),
+        router=PageRouter(
+            ocr_enabled=settings.rag_ocr_enabled,
+            vision_enabled=settings.rag_vision_enabled,
+        ),
         ocr_provider=PaddleOcrProvider(device=settings.rag_ocr_device),
         vision_provider=OpenAICompatibleVisionProvider(
             base_url=settings.effective_rag_vision_base_url,

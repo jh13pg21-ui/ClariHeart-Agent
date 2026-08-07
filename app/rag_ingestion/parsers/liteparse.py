@@ -23,17 +23,19 @@ class LiteParseDocumentParser:
         *,
         parser_factory: Callable[..., object] | None = None,
         dpi: int = 150,
+        ocr_enabled: bool = False,
     ):
         self.artifact_store = artifact_store
         self.parser_factory = parser_factory or self._default_factory
         self.dpi = dpi
+        self.ocr_enabled = ocr_enabled
 
     def parse_bytes(self, filename: str, data: bytes, context: ParserContext) -> ParseEvidence:
         if not context.source_sha256:
             raise ValueError("PDF parser 需要 source_sha256")
         self.artifact_store.write_source(context.document_id, context.source_sha256, data)
         parser = self.parser_factory(
-            ocr_enabled=False,
+            ocr_enabled=self.ocr_enabled,
             dpi=float(self.dpi),
             output_format="json",
             keep_headers_footers=True,

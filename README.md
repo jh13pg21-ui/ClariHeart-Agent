@@ -406,9 +406,9 @@ target/rag-eval-report.json
 
 ## 生产级 RAG 文档摄取
 
-PDF 首先由 LiteParse 2.11.1 在关闭内置 OCR 的条件下提取原生文字、坐标、页面图像和复杂度证据。LiteParse 不是最终 OCR，也不决定页面是否调用云模型。独立的二维路由器分别选择文字策略 `NATIVE / PADDLE_OCR / HYBRID` 与结构策略 `LOCAL / VISION`：纯文本页保留本地低成本路径，扫描文字交给 PaddleOCR，双栏、表格、漫画和信息图仅在确有结构或视觉语义需求时调用 Vision。
+PDF 首先由 LiteParse 2.11.1 提取原生文字、坐标、页面图像和复杂度证据；其内置 OCR 默认关闭，可由 `RAG_LITEPARSE_OCR_ENABLED` 显式控制。LiteParse 不是最终 OCR，也不决定页面是否调用云模型。独立的二维路由器分别选择文字策略 `NATIVE / PADDLE_OCR / HYBRID` 与结构策略 `LOCAL / VISION`：纯文本页保留本地低成本路径，扫描文字交给 PaddleOCR，双栏、表格、漫画和信息图仅在确有结构或视觉语义需求时调用 Vision。`RAG_OCR_ENABLED=false` 时低质量文字页直接升级到 Vision；`RAG_VISION_ENABLED=false` 时需要视觉理解的页面进入 `NEEDS_REVIEW`，不会静默降级。
 
-所有证据经过本地严格 Schema 校验与融合，形成唯一的 Canonical Document JSON。父块保存完整章节上下文，子块用于召回；检索命中子块后返回父块内容，同时保留 `documentId`、页码、章节路径和 block 引用。旧的固定字符窗口只保留为历史数据兼容路径，不再承担新文件摄取。
+所有证据经过本地严格 Schema 校验与融合，形成唯一的 Canonical Document JSON。父块保存完整章节上下文并按 `RAG_PARENT_TARGET_TOKENS` 软目标切分，且不超过可拆分边界内的 `RAG_PARENT_MAX_TOKENS`；子块按 target/min/max 参数切分，小尾块在不超过 max 时合并，相邻叙事子块最多复用 `RAG_CHILD_OVERLAP_TOKENS` 的上下文。表格继续按完整行切分并重复表头，不使用叙事文本重叠。检索命中子块后返回父块内容，同时保留 `documentId`、页码、章节路径和 block 引用。旧的固定字符窗口只保留为历史数据兼容路径，不再承担新文件摄取。
 
 安装与启动：
 

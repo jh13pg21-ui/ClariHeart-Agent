@@ -106,6 +106,7 @@ class StructureAwareChunker:
         groups: list[list[_BlockRef]] = []
         current: list[_BlockRef] = []
         current_key: tuple[str, ...] | None = None
+        parent_target = max(1, min(self.config.parent_target_tokens, self.config.parent_max_tokens))
         special = {BlockType.TABLE, BlockType.FIGURE, BlockType.COMIC_PANEL}
         for page in document.pages:
             for block in sorted(page.blocks, key=lambda item: item.reading_order):
@@ -121,7 +122,11 @@ class StructureAwareChunker:
                     current_key = None
                     continue
                 projected = self._parent_content([*current, ref]) if current else block.text
-                if current and (key != current_key or estimate_tokens(projected) > self.config.parent_max_tokens):
+                if current and (
+                    key != current_key
+                    or estimate_tokens(projected) > parent_target
+                    or estimate_tokens(projected) > self.config.parent_max_tokens
+                ):
                     groups.append(current)
                     current = []
                 current.append(ref)
@@ -142,25 +147,131 @@ class StructureAwareChunker:
             return [(self._parent_content(refs), refs)]
 
         prefix = self._prefix(refs)
-        budget = max(1, self.config.child_max_tokens - estimate_tokens(prefix) - 1)
+        prefix_tokens = estimate_tokens(prefix)
+        max_body_tokens = max(1, self.config.child_max_tokens - prefix_tokens)
+        target_body_tokens = max(
+            1,
+            min(max_body_tokens, self.config.child_target_tokens - prefix_tokens),
+        )
         units: list[tuple[str, _BlockRef]] = []
         for ref in refs:
-            for piece in self._split_text(ref.block.text, budget):
+            for piece in self._split_text(ref.block.text, max_body_tokens):
                 units.append((piece, ref))
+        groups = self._pack_child_units(units, target_body_tokens)
+        groups = self._merge_small_child_groups(prefix, groups)
+
         chunks: list[tuple[str, list[_BlockRef]]] = []
-        texts: list[str] = []
-        chunk_refs: list[_BlockRef] = []
-        for text, ref in units:
-            projected = "\n".join([*texts, text])
-            if texts and estimate_tokens(projected) > min(self.config.child_target_tokens, budget):
-                chunks.append((f"{prefix}\n" + "\n".join(texts), chunk_refs.copy()))
-                texts.clear()
-                chunk_refs.clear()
-            texts.append(text)
-            chunk_refs.append(ref)
-        if texts:
-            chunks.append((f"{prefix}\n" + "\n".join(texts), chunk_refs.copy()))
+        for index, group in enumerate(groups):
+            rendered = self._render_child(prefix, group)
+            overlap: list[tuple[str, _BlockRef]] = []
+            if index > 0 and self.config.child_overlap_tokens > 0:
+                available = max(0, self.config.child_max_tokens - estimate_tokens(rendered))
+                overlap = self._overlap_units(
+                    groups[index - 1],
+                    min(self.config.child_overlap_tokens, available),
+                )
+            final_units = [*overlap, *group]
+            chunks.append(
+                (
+                    self._render_child(prefix, final_units),
+                    self._unique_refs(ref for _, ref in final_units),
+                )
+            )
         return chunks
+
+    @staticmethod
+    def _unique_refs(refs) -> list[_BlockRef]:
+        result: list[_BlockRef] = []
+        seen: set[tuple[int, str]] = set()
+        for ref in refs:
+            key = (ref.page_number, ref.block.block_id)
+            if key not in seen:
+                seen.add(key)
+                result.append(ref)
+        return result
+
+    @staticmethod
+    def _pack_child_units(
+        units: list[tuple[str, _BlockRef]],
+        target_body_tokens: int,
+    ) -> list[list[tuple[str, _BlockRef]]]:
+        groups: list[list[tuple[str, _BlockRef]]] = []
+        current: list[tuple[str, _BlockRef]] = []
+        for unit in units:
+            projected = "\n".join(text for text, _ in [*current, unit])
+            if current and estimate_tokens(projected) > target_body_tokens:
+                groups.append(current)
+                current = []
+            current.append(unit)
+        if current:
+            groups.append(current)
+        return groups
+
+    def _merge_small_child_groups(
+        self,
+        prefix: str,
+        groups: list[list[tuple[str, _BlockRef]]],
+    ) -> list[list[tuple[str, _BlockRef]]]:
+        minimum = min(self.config.child_min_tokens, self.config.child_max_tokens)
+        index = 0
+        while len(groups) > 1 and index < len(groups):
+            if estimate_tokens(self._render_child(prefix, groups[index])) >= minimum:
+                index += 1
+                continue
+            if index > 0:
+                merged = [*groups[index - 1], *groups[index]]
+                if estimate_tokens(self._render_child(prefix, merged)) <= self.config.child_max_tokens:
+                    groups[index - 1] = merged
+                    groups.pop(index)
+                    index = max(0, index - 1)
+                    continue
+            if index + 1 < len(groups):
+                merged = [*groups[index], *groups[index + 1]]
+                if estimate_tokens(self._render_child(prefix, merged)) <= self.config.child_max_tokens:
+                    groups[index] = merged
+                    groups.pop(index + 1)
+                    continue
+            index += 1
+        return groups
+
+    @staticmethod
+    def _render_child(prefix: str, units: list[tuple[str, _BlockRef]]) -> str:
+        return f"{prefix}\n" + "\n".join(text for text, _ in units)
+
+    @classmethod
+    def _overlap_units(
+        cls,
+        previous: list[tuple[str, _BlockRef]],
+        budget: int,
+    ) -> list[tuple[str, _BlockRef]]:
+        if budget <= 0:
+            return []
+        selected: list[tuple[str, _BlockRef]] = []
+        remaining = budget
+        for text, ref in reversed(previous):
+            clean = text.strip()
+            tokens = estimate_tokens(clean)
+            if tokens <= remaining:
+                selected.insert(0, (clean, ref))
+                remaining -= tokens
+                continue
+            tail = cls._tail_within_budget(clean, remaining)
+            if tail:
+                selected.insert(0, (tail, ref))
+            break
+        return selected
+
+    @staticmethod
+    def _tail_within_budget(text: str, budget: int) -> str:
+        if budget <= 0:
+            return ""
+        candidate = ""
+        for character in reversed(text.strip()):
+            projected = character + candidate
+            if estimate_tokens(projected) > budget:
+                break
+            candidate = projected
+        return candidate.strip()
 
     def _table_chunks(self, ref: _BlockRef) -> list[str]:
         table = ref.block.table

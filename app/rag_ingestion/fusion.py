@@ -145,7 +145,7 @@ class PageEvidenceFusion:
             return native.text, native.confidence, provenance
         if ocr is not None:
             return ocr.text, ocr.confidence, provenance
-        return visual.text, min(visual.confidence, 0.5), []
+        return visual.text, min(visual.confidence, 0.5), provenance
 
     def _from_native(self, version_id: str, page: PageEvidence, item: EvidenceBlock, order: int) -> CanonicalBlock:
         return CanonicalBlock(

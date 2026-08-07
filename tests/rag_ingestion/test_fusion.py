@@ -81,3 +81,37 @@ def test_hybrid_route_adds_non_overlapping_ocr_text():
     )
     assert [block.text for block in page.blocks] == ["政策编号 12345", "图片中的求助提示"]
     assert page.blocks[1].provenance[0].provider == "paddleocr"
+
+
+def test_vision_only_fallback_remains_searchable_when_ocr_is_disabled():
+    source = PageEvidence(
+        page_number=1,
+        geometry=PageGeometry(width_px=1000, height_px=1400),
+        image_path="page.png",
+        native_blocks=[],
+        features=PageFeatures(native_text_score=0.0),
+    )
+    vision = VisionPageResult(
+        page_number=1,
+        page_type="comic",
+        blocks=[
+            VisionBlock(
+                type=BlockType.COMIC_PANEL,
+                reading_order=0,
+                bbox_norm=[0.1, 0.1, 0.9, 0.9],
+                text="人物正在练习缓慢呼吸。",
+                confidence=0.9,
+            )
+        ],
+    )
+
+    page = PageEvidenceFusion().fuse(
+        "docver_1",
+        source,
+        PageRoute(text_strategy=TextStrategy.NATIVE, structure_strategy=StructureStrategy.VISION),
+        vision=vision,
+    )
+
+    assert page.blocks[0].searchable is True
+    assert page.blocks[0].text == "人物正在练习缓慢呼吸。"
+    assert [item.provider for item in page.blocks[0].provenance] == ["vision"]

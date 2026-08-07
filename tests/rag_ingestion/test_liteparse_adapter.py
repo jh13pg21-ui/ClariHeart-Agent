@@ -82,3 +82,25 @@ def test_liteparse_adapter_disables_ocr_and_normalizes_page_evidence(tmp_path):
     assert result.pages[0].native_blocks[0].confidence == 1.0
     assert result.pages[0].features.native_text_score > 0
     assert (tmp_path / "doc_1" / ("b" * 64) / "pages" / "0001.png").read_bytes() == b"png"
+
+
+def test_liteparse_adapter_forwards_explicit_ocr_switch(tmp_path):
+    parser = LiteParseDocumentParser(
+        artifact_store=ArtifactStore(tmp_path),
+        parser_factory=FakeLiteParse,
+        ocr_enabled=True,
+    )
+
+    parser.parse_bytes(
+        "scan.pdf",
+        b"%PDF-fake",
+        ParserContext(
+            document_id="doc_2",
+            version_id="docver_2",
+            access_class=AccessClass.BUILTIN_PUBLIC,
+            cloud_vision_allowed=True,
+            source_sha256="c" * 64,
+        ),
+    )
+
+    assert FakeLiteParse.kwargs["ocr_enabled"] is True

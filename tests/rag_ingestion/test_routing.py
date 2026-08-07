@@ -53,3 +53,40 @@ def test_private_complex_page_requires_review_without_cloud_authorization():
     assert route.structure_strategy == StructureStrategy.VISION
     assert route.status == PageStatus.NEEDS_REVIEW
     assert "cloud_vision_forbidden" in route.reasons
+
+
+def test_disabled_paddle_routes_weak_native_text_to_vision():
+    route = PageRouter(ocr_enabled=False, vision_enabled=True).route(
+        page(native_text_score=0.4, layout_complexity=0.2),
+        AccessClass.BUILTIN_PUBLIC,
+        True,
+    )
+
+    assert route.text_strategy == TextStrategy.NATIVE
+    assert route.structure_strategy == StructureStrategy.VISION
+    assert route.status == PageStatus.READY
+    assert "ocr_disabled" in route.reasons
+
+
+def test_disabled_vision_marks_complex_page_for_review():
+    route = PageRouter(ocr_enabled=True, vision_enabled=False).route(
+        page(native_text_score=0.95, table_candidate=True),
+        AccessClass.BUILTIN_PUBLIC,
+        True,
+    )
+
+    assert route.structure_strategy == StructureStrategy.VISION
+    assert route.status == PageStatus.NEEDS_REVIEW
+    assert "vision_disabled" in route.reasons
+
+
+def test_disabled_ocr_and_vision_marks_weak_text_for_review():
+    route = PageRouter(ocr_enabled=False, vision_enabled=False).route(
+        page(native_text_score=0.3),
+        AccessClass.BUILTIN_PUBLIC,
+        True,
+    )
+
+    assert route.status == PageStatus.NEEDS_REVIEW
+    assert "ocr_disabled" in route.reasons
+    assert "vision_disabled" in route.reasons

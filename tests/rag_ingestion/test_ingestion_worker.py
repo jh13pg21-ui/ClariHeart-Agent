@@ -1,5 +1,6 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from app.core.config import Settings
 from app.workers import ingestion_tasks
 from app.workers.celery_app import celery_app
 
@@ -20,3 +21,19 @@ def test_ingestion_task_is_routed_to_dedicated_queue():
         "app.workers.ingestion_tasks.ingest_knowledge_document"
     ]
     assert route["queue"] == "mindbridge.ingestion"
+
+
+def test_pipeline_builder_wires_ingestion_feature_switches(tmp_path):
+    settings = Settings(
+        rag_artifact_dir=str(tmp_path),
+        rag_liteparse_ocr_enabled=True,
+        rag_ocr_enabled=False,
+        rag_vision_enabled=False,
+        knowledge_vector_enabled=False,
+    )
+
+    pipeline = ingestion_tasks.build_ingestion_pipeline(MagicMock(), settings)
+
+    assert pipeline.parsers["application/pdf"].ocr_enabled is True
+    assert pipeline.router.ocr_enabled is False
+    assert pipeline.router.vision_enabled is False
