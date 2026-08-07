@@ -37,6 +37,10 @@ class OutboxService:
         }
         if payload.get("jobId") is not None:
             minimal_payload["jobId"] = payload["jobId"]
+        if payload.get("consolidationRunId") is not None:
+            minimal_payload["consolidationRunId"] = payload[
+                "consolidationRunId"
+            ]
         event = OutboxEvent(
             event_id=event_id,
             idempotency_key=idempotency_key,

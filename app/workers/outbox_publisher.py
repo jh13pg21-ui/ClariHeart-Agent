@@ -14,6 +14,7 @@ from app.models.entities import (
     ConversationMemorySummary,
     KnowledgeDocumentVersion,
     KnowledgeIngestionJob,
+    MemoryConsolidationRun,
     OutboxEvent,
 )
 from app.workers.celery_app import celery_app
@@ -33,6 +34,10 @@ class CeleryBroker:
         ),
         "memory.summary.refresh": (
             "app.workers.tasks.refresh_conversation_summary",
+            "general",
+        ),
+        "memory.consolidate": (
+            "app.workers.tasks.consolidate_long_term_memory",
             "general",
         ),
         "knowledge.ingest": (
@@ -56,11 +61,16 @@ class CeleryBroker:
         else:
             queue = self.settings.celery_general_queue
         payload = json.loads(event.payload_json)
-        args = (
-            [str(payload["jobId"])]
-            if event.event_type == "knowledge.ingest"
-            else [event.event_id, int(event.aggregate_id)]
-        )
+        if event.event_type == "knowledge.ingest":
+            args = [str(payload["jobId"])]
+        elif event.event_type == "memory.consolidate":
+            args = [
+                event.event_id,
+                int(event.aggregate_id),
+                str(payload["consolidationRunId"]),
+            ]
+        else:
+            args = [event.event_id, int(event.aggregate_id)]
         celery_app.send_task(
             task_name,
             args=args,
@@ -135,6 +145,23 @@ class OutboxPublisher:
 
     @staticmethod
     def _mark_terminal_publish_failure(db: Session, event: OutboxEvent) -> None:
+        if event.event_type == "memory.consolidate":
+            payload = json.loads(event.payload_json)
+            run = (
+                db.query(MemoryConsolidationRun)
+                .filter(
+                    MemoryConsolidationRun.public_id
+                    == str(payload.get("consolidationRunId", ""))
+                )
+                .first()
+            )
+            if run is not None and run.status == "QUEUED":
+                run.status = "FAILED"
+                run.last_error = "记忆整合事件投递失败"
+                run.finished_at = datetime.utcnow()
+                run.updated_at = datetime.utcnow()
+                db.add(run)
+            return
         if event.event_type == "memory.summary.refresh":
             message = db.get(ChatMessage, int(event.aggregate_id))
             if message is None:

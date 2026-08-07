@@ -149,6 +149,10 @@ class Settings(BaseSettings):
     long_term_memory_relevant_items: int = 5
     long_term_memory_extract_messages: int = 10
     long_term_memory_extract_min_new_messages: int = 6
+    memory_consolidation_enabled: bool = False
+    memory_consolidation_min_interval_hours: float = 24.0
+    memory_consolidation_min_active_memories: int = 10
+    memory_consolidation_min_modified_sessions: int = 5
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_username: str = ""

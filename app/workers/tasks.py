@@ -19,11 +19,13 @@ from app.models.entities import (
     DeadLetterRecord,
     PsychologicalReport,
     RiskCase,
+    MemoryConsolidationRun,
     ToolJob,
 )
 from app.services.outbox import OutboxService
 from app.services.conversation_summary import ConversationSummaryService
 from app.services.long_term_memory import LongTermMemoryService
+from app.services.memory_consolidation import MemoryConsolidationService
 from app.services.memory import RedisShortTermMemoryStore
 from app.services.privacy_retention import PrivacyRetentionService
 from app.services.tool_governance import ToolGovernanceService
@@ -109,12 +111,92 @@ def extract_long_term_memory(
         if session is not None:
             session.long_term_memory_extracted_message_id = message.id
             db.add(session)
+        consolidation_run = MemoryConsolidationService(
+            db,
+            worker_settings,
+        ).reserve_schedule(message.user_id)
+        if consolidation_run is not None:
+            OutboxService.add_event(
+                db,
+                "memory.consolidate",
+                "user",
+                message.user_id,
+                {
+                    "riskLevel": None,
+                    "consolidationRunId": consolidation_run.public_id,
+                },
+                f"memory.consolidate:{consolidation_run.public_id}",
+            )
         db.commit()
         return {
             "status": "SUCCESS",
             "eventId": event_id,
             "messageId": assistant_message_id,
             "stored": len(stored),
+        }
+    except RetryableTaskError:
+        raise
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.workers.tasks.consolidate_long_term_memory",
+    autoretry_for=(RetryableTaskError,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=5,
+)
+def consolidate_long_term_memory(
+    event_id: str,
+    user_id: int,
+    run_public_id: str,
+) -> dict:
+    db: Session = SessionLocal()
+    try:
+        marker = _claim_message(
+            db,
+            "consolidate_long_term_memory",
+            event_id,
+        )
+        if marker is None:
+            return {"status": "ALREADY_PROCESSED", "eventId": event_id}
+        run = (
+            db.query(MemoryConsolidationRun)
+            .filter(
+                MemoryConsolidationRun.public_id == run_public_id,
+                MemoryConsolidationRun.user_id == user_id,
+            )
+            .first()
+        )
+        if run is None:
+            db.commit()
+            return {
+                "status": "NOT_FOUND",
+                "eventId": event_id,
+                "runId": run_public_id,
+            }
+        result = asyncio.run(
+            MemoryConsolidationService(
+                db,
+                worker_settings,
+            ).consolidate(user_id, run=run)
+        )
+        if result.status == "FAILED":
+            db.rollback()
+            raise RetryableTaskError(result.error or "记忆整合暂时失败")
+        db.commit()
+        return {
+            "status": result.status,
+            "eventId": event_id,
+            "runId": run_public_id,
+            "kept": result.kept,
+            "merged": result.merged,
+            "superseded": result.superseded,
+            "expired": result.expired,
         }
     except RetryableTaskError:
         raise

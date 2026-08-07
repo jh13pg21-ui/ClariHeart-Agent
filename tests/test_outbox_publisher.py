@@ -180,6 +180,36 @@ class OutboxPublisherTests(unittest.TestCase):
         self.assertEqual(kwargs["queue"], "mindbridge.ingestion")
         self.assertEqual(kwargs["routing_key"], "mindbridge.ingestion")
 
+    def test_memory_consolidation_event_passes_run_id(self):
+        settings = SimpleNamespace(
+            celery_alert_queue="mindbridge.alert",
+            celery_general_queue="mindbridge.general",
+            rag_ingestion_queue="mindbridge.ingestion",
+        )
+        event = SimpleNamespace(
+            event_type="memory.consolidate",
+            event_id="event-consolidate",
+            aggregate_id="7",
+            idempotency_key="memory.consolidate:run-1",
+            payload_json=json.dumps(
+                {"consolidationRunId": "run-1", "riskLevel": None}
+            ),
+        )
+
+        with patch("app.workers.outbox_publisher.celery_app.send_task") as send_task:
+            CeleryBroker(settings).publish(event)
+
+        send_task.assert_called_once()
+        _, kwargs = send_task.call_args
+        self.assertEqual(
+            kwargs["args"],
+            ["event-consolidate", 7, "run-1"],
+        )
+        self.assertEqual(
+            kwargs["queue"],
+            "mindbridge.general",
+        )
+
     def test_exhausted_knowledge_publish_marks_job_as_retryable_failure(self):
         db = self.Session()
         document = KnowledgeDocument(
