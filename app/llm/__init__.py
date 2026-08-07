@@ -5,6 +5,12 @@ from app.llm.contracts import ModelRequest, ModelResult, ModelStreamEvent
 from app.llm.errors import ModelError, ModelErrorCode
 from app.llm.egress import CloudEgressDecision, CloudEgressPolicy
 from app.llm.providers import ModelProvider, OllamaProvider, OpenAICompatibleProvider
+from app.llm.recovery import (
+    RecoveryEvent,
+    RecoveryOrchestrator,
+    RecoveryPolicy,
+    RecoveryState,
+)
 
 __all__ = [
     "ModelCapabilities",
@@ -19,4 +25,8 @@ __all__ = [
     "ModelProvider",
     "OllamaProvider",
     "OpenAICompatibleProvider",
+    "RecoveryEvent",
+    "RecoveryOrchestrator",
+    "RecoveryPolicy",
+    "RecoveryState",
 ]
