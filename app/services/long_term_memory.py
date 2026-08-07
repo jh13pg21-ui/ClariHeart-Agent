@@ -11,10 +11,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.models.entities import ChatMessage, ChatSession, LongTermMemory, UserAccount
-from app.schemas.dtos import AiMessage, LongTermMemoryResponse
+from app.schemas.dtos import LongTermMemoryResponse
 from app.services.ai import AiClient
 from app.services.privacy import PrivacySanitizer
 from app.services.data_protection import SensitiveTextProtector
+from app.prompts.runtime import registered_complete
 
 
 MEMORY_TYPES = {"PROFILE", "PREFERENCE", "SUPPORT", "CONTEXT"}
@@ -293,28 +294,15 @@ class LongTermMemoryService:
         )
         candidates: list[dict[str, str]] = []
         try:
-            raw = await self.ai.complete(
-                [
-                    AiMessage(
-                        role="system",
-                        content=(
-                            "你是长期记忆提取器。只提取跨会话仍稳定、有助于以后服务该学生的信息。"
-                            "允许类型：PROFILE（背景或称呼）、PREFERENCE（互动偏好）、"
-                            "SUPPORT（被学生明确认可的帮助方式）、CONTEXT（持续目标或长期事项）。"
-                            "禁止保存手机号、邮箱、身份证、地址、密码、诊断标签、风险等级、"
-                            "自杀自残原话、一次性情绪和助手自行推测。"
-                            "仅返回 JSON 数组；每项必须含 type、name、description、body。"
-                            "没有值得保存的信息时返回 []。"
-                        ),
-                    ),
-                    AiMessage(
-                        role="user",
-                        content=(
-                            f"已有记忆索引：\n{existing_index}\n\n"
-                            f"最近对话：\n{dialogue}"
-                        ),
-                    ),
-                ]
+            raw = await registered_complete(
+                self.ai,
+                agent_name="LongTermMemoryService",
+                agent_prompt_id="agent.context",
+                task_name="memory_extraction",
+                payload={
+                    "existingMemoryIndex": json.loads(existing_index),
+                    "recentDialogue": dialogue,
+                },
             )
             candidates = self._parse_candidates(raw)
         except Exception:
@@ -370,23 +358,16 @@ class LongTermMemoryService:
             for item in items
         ]
         try:
-            raw = await self.ai.complete(
-                [
-                    AiMessage(
-                        role="system",
-                        content=(
-                            f"根据当前输入从长期记忆索引中选择最多 {limit} 个相关 id。"
-                            "只返回 JSON 字符串数组；无相关项返回 []。"
-                        ),
-                    ),
-                    AiMessage(
-                        role="user",
-                        content=(
-                            f"当前输入：\n{query}\n\n记忆索引：\n"
-                            f"{json.dumps(index, ensure_ascii=False)}"
-                        ),
-                    ),
-                ]
+            raw = await registered_complete(
+                self.ai,
+                agent_name="LongTermMemoryService",
+                agent_prompt_id="agent.context",
+                task_name="memory_selection",
+                payload={
+                    "limit": limit,
+                    "currentInput": query,
+                    "memoryIndex": index,
+                },
             )
             ids = json.loads(self._strip_code_fence(raw))
             if not isinstance(ids, list):

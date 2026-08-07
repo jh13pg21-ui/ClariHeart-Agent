@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from typing import AsyncIterator, Iterable
 
@@ -8,11 +9,17 @@ import httpx
 
 from app.core.config import Settings
 from app.core.enums import IntentType, RiskLevel
+from app.context.contracts import ContextEnvelope, ContextSection
+from app.context.planner import ContextPlanner
+from app.context.tokens import TokenEstimatorRegistry
 from app.llm.capabilities import ModelCapabilitiesRegistry
 from app.llm.contracts import ModelRequest, ModelResult, ModelStreamEvent
 from app.llm.gateway import ModelGateway, ReplaceCallback, StreamReviewer
 from app.llm.providers import OllamaProvider, OpenAICompatibleProvider
 from app.llm.recovery import RecoveryPolicy
+from app.prompts.assembler import PromptAssembler, PromptRequest
+from app.prompts.registry import default_prompt_registry
+from app.prompts.runtime import registered_task_messages, render_registered_prefix
 from app.schemas.dtos import AiMessage
 from app.services.privacy import PrivacySanitizer
 from app.services.risk_rules import detect_risk_signal
@@ -21,54 +28,51 @@ from app.services.risk_rules import detect_risk_signal
 class PromptTemplates:
     @staticmethod
     def intent_prompt(history: list[AiMessage], user_input: str) -> list[AiMessage]:
-        return [
-            AiMessage(role="system", content=(
-                "你是一个用户意图分类器，只做意图识别，不回答问题。"
-                "只输出 CHAT、CONSULT 之一。CHAT 包含普通闲聊、学习、编程、作业、校园事务；"
-                "CONSULT 包含压力、焦虑、低落、失眠、情绪倾诉以及自杀、自残、伤人或即时危险表达。"
-                "风险程度由独立 SafetyAgent 评估，不要输出 RISK。"
-                "必须结合最近上下文理解“是、继续、安慰一下、然后呢”等省略或承接表达，"
-                "不能因为当前输入很短就忽略上一轮正在讨论的主题。"
-            )),
-            AiMessage(role="user", content=f"最近上下文：\n{format_history(history)}\n\n当前输入：\n{user_input}"),
-        ]
+        return registered_task_messages(
+            "agent.understanding",
+            "task.intent_classification",
+            {
+                "recentHistory": [message.model_dump() for message in history[-20:]],
+                "currentInput": user_input,
+            },
+        )
 
     @staticmethod
     def psychology_prompt(history: list[AiMessage], user_input: str) -> list[AiMessage]:
-        return [
-            AiMessage(role="system", content=(
-                "你负责分析校园心理健康消息。只返回严格 JSON："
-                '{"emotion":"NORMAL|ANXIETY|DEPRESSED|HIGH_RISK","emotionScore":0.0,'
-                '"risk":"LOW|MEDIUM|HIGH","confidence":0.0,"summary":"short reason"}。'
-                "评估时必须结合最近上下文；对承接上一轮的短句，不得仅因当前文字缺少风险关键词就忽略尚未解决的风险。"
-            )),
-            AiMessage(role="user", content=f"最近上下文：\n{format_history(history)}\n\n当前输入：\n{user_input}"),
-        ]
+        return registered_task_messages(
+            "agent.safety",
+            "task.risk_assessment",
+            {
+                "recentHistory": [message.model_dump() for message in history[-20:]],
+                "currentInput": user_input,
+            },
+        )
 
     @staticmethod
     def answer_system_prompt(intent: IntentType, risk: RiskLevel, context: str, display_name: str, skill_context: str = "") -> AiMessage:
-        if intent == IntentType.CHAT:
-            content = (
-                "你是 MindBridge，一个面向学生的日常陪伴与校园生活助手。"
-                "普通学习、编程、校园事务和通用问题请自然、准确、直接地回答。"
-                "不要主动做心理测评，不要输出风险等级、心理标签、诊断结论或报告口吻。"
-                f"学生显示名：{display_name}"
-            )
-            return AiMessage(role="system", content=content)
-        crisis_rule = ""
-        if risk == RiskLevel.HIGH:
-            crisis_rule = (
-                "\n高风险处理规则：先回应情绪，再关注当前安全；鼓励用户立刻联系身边可信任的人、"
-                "学校辅导员/心理中心或当地紧急救助；不提供任何危险操作细节。"
-            )
-        content = (
-            "你是 MindBridge，一个面向学生的校园心理关怀智能体。"
-            "回答要共情、谨慎、非评判，不诊断疾病，不开药，不替代持证心理咨询师。"
-            "不要向学生输出风险等级、报告分数或后台标签。"
-            "优先基于检索知识回答；知识不足时明确说明并给出安全通用建议。"
-            f"\n学生显示名：{display_name}\n检索知识：\n{context}\n\n可用 skill 指引：\n{skill_context or '无'}{crisis_rule}"
+        mode = "normal_chat" if intent == IntentType.CHAT and risk == RiskLevel.LOW else "support"
+        prefix = render_registered_prefix(
+            "agent.response",
+            "task.response_generation",
+            mode=mode,
         )
-        return AiMessage(role="system", content=content)
+        attachment = {
+            "trust": "UNTRUSTED_DATA",
+            "displayName": display_name,
+            "retrievedKnowledge": context,
+            "skillContext": skill_context,
+            "intent": intent.value,
+            "risk": risk.value,
+        }
+        return AiMessage(
+            role="system",
+            content=prefix + "\n\nUNTRUSTED_DATA\n" + json.dumps(
+                attachment,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
 
 
 class _MockModelProvider:
@@ -116,6 +120,9 @@ class AiClient:
         self.http_client = http_client or httpx.AsyncClient(
             timeout=httpx.Timeout(60.0, connect=5.0, read=45.0, write=15.0, pool=5.0)
         )
+        self._capabilities_registry = ModelCapabilitiesRegistry(self.settings)
+        self._estimator_registry = TokenEstimatorRegistry(self.settings)
+        self._prompt_registry = default_prompt_registry()
         self.gateway = gateway or self._build_gateway()
         self._sanitizer = PrivacySanitizer()
 
@@ -150,6 +157,74 @@ class AiClient:
             stream=False,
         )
         return await self.gateway.complete(request)
+
+    async def complete_registered_task(
+        self,
+        *,
+        agent_name: str,
+        agent_prompt_id: str,
+        task_name: str,
+        payload,
+        risk_level: RiskLevel = RiskLevel.LOW,
+        mode: str = "default",
+        locale: str = "zh-CN",
+    ) -> ModelResult:
+        provider = self._provider_name()
+        model = self._model_name(provider)
+        capabilities = self._capabilities_registry.for_model(provider, model)
+        estimator = self._estimator_registry.for_model(capabilities)
+        request_id = uuid.uuid4().hex
+        content = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        envelope = ContextEnvelope(
+            request_id=request_id,
+            agent_name=agent_name,
+            task_name=task_name,
+            risk_level=risk_level,
+            sections=(
+                ContextSection(
+                    id="user.current",
+                    category="user",
+                    content=content,
+                    required=True,
+                    priority=100,
+                    loading_reason="registered_task_payload",
+                ),
+            ),
+        )
+        planner = ContextPlanner(
+            estimator,
+            reserve_tokens=int(getattr(self.settings, "model_recovery_reserve_tokens", 1024)),
+            margin_ratio=float(getattr(self.settings, "model_provider_safety_margin_ratio", 0.10)),
+        )
+        plan = planner.plan(
+            envelope,
+            capabilities,
+            max(1, int(getattr(self.settings, "ai_max_tokens", 512))),
+        )
+        task_prompt_id = f"task.{task_name}"
+        assembled = PromptAssembler(self._prompt_registry, estimator).assemble(
+            PromptRequest(
+                request_id=request_id,
+                agent_name=agent_name,
+                task_name=task_name,
+                agent_prompt_id=agent_prompt_id,
+                task_prompt_id=task_prompt_id,
+                mode=mode,
+                locale=locale,
+            ),
+            plan,
+        )
+        definition = self._prompt_registry.get(task_prompt_id)
+        return await self.complete_result(
+            list(assembled.messages),
+            agent_name=agent_name,
+            task_name=task_name,
+            risk_level=risk_level,
+            cloud_egress_allowed=risk_level is not RiskLevel.HIGH,
+            context_section_ids=assembled.context_section_ids,
+            output_schema_id=definition.output_schema_id,
+            prompt_manifest_hash=assembled.manifest.manifest_hash,
+        )
 
     async def stream(
         self,
@@ -267,7 +342,7 @@ class AiClient:
             providers,
             cloud_provider="openai",
             cloud_model=str(getattr(self.settings, "openai_model", "")),
-            capabilities_registry=ModelCapabilitiesRegistry(self.settings),
+            capabilities_registry=self._capabilities_registry,
             recovery_policy=RecoveryPolicy(
                 max_transient_retries=int(
                     getattr(self.settings, "model_recovery_max_transient_retries", 2)
@@ -310,13 +385,13 @@ class AiClient:
     def _mock(self, messages: list[AiMessage]) -> str:
         last = next((m.content for m in reversed(messages) if m.role == "user"), "")
         system = " ".join(m.content for m in messages if m.role == "system")
-        if "严格 JSON" in system:
+        if "严格 JSON" in system or "task.risk_assessment" in system:
             if has_high_risk_signal(last):
                 return '{"emotion":"HIGH_RISK","emotionScore":4.0,"risk":"HIGH","confidence":0.95,"summary":"检测到明确高风险表达"}'
             if has_consult_signal(last):
                 return '{"emotion":"ANXIETY","emotionScore":2.5,"risk":"LOW","confidence":0.72,"summary":"检测到压力或情绪求助表达"}'
             return '{"emotion":"NORMAL","emotionScore":0.0,"risk":"LOW","confidence":0.66,"summary":"未检测到明显风险信号"}'
-        if "意图分类器" in system:
+        if "意图分类器" in system or "task.intent_classification" in system:
             if has_high_risk_signal(last):
                 return "RISK"
             if has_consult_signal(last):
