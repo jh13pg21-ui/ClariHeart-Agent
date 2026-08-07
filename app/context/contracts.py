@@ -20,6 +20,7 @@ class ContextSection:
     provenance_ids: tuple[str, ...] = ()
     loading_reason: str = ""
     message_role: str = ""
+    emit: bool = True
     token_count: int = 0
     compaction_level: int = 0
 

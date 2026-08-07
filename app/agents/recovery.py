@@ -8,6 +8,7 @@ from enum import Enum
 import httpx
 
 from app.agents.events import AgentArtifact, CollaborationBlackboard
+from app.llm.errors import ModelError, ModelErrorCode
 
 
 class AgentFailureKind(str, Enum):
@@ -31,6 +32,39 @@ def classify_agent_error(exc: BaseException) -> AgentExecutionFailure:
     error_type = type(exc).__name__
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
         return AgentExecutionFailure(AgentFailureKind.TIMEOUT, error_type, message or "task timed out", True)
+    if isinstance(exc, ModelError):
+        if exc.code == ModelErrorCode.PROMPT_TOO_LONG:
+            return AgentExecutionFailure(
+                AgentFailureKind.CONTEXT_OVERFLOW,
+                error_type,
+                message,
+                exc.retryable,
+            )
+        if exc.code == ModelErrorCode.TIMEOUT:
+            return AgentExecutionFailure(
+                AgentFailureKind.TIMEOUT,
+                error_type,
+                message,
+                exc.retryable,
+            )
+        if exc.code in {
+            ModelErrorCode.RATE_LIMITED,
+            ModelErrorCode.OVERLOADED,
+            ModelErrorCode.NETWORK,
+            ModelErrorCode.STREAM_INTERRUPTED,
+        }:
+            return AgentExecutionFailure(
+                AgentFailureKind.TRANSIENT,
+                error_type,
+                message,
+                exc.retryable,
+            )
+        return AgentExecutionFailure(
+            AgentFailureKind.PERMANENT,
+            error_type,
+            message,
+            False,
+        )
     if any(
         marker in lowered
         for marker in (
@@ -69,30 +103,30 @@ def retry_delay(attempt: int, base_seconds: float, max_seconds: float, jitter_ra
 
 
 def compact_board_for_retry(board: CollaborationBlackboard) -> CollaborationBlackboard:
-    """为本地模型的上下文溢出提供一次激进、可审计的重试视图。"""
+    """标记一次响应边界的应急规划，不在黑板层截断或改写证据。"""
 
     artifacts = []
     for artifact in board.artifacts:
-        payload = dict(artifact.payload)
-        if artifact.kind == "memory":
-            history = list(payload.get("history", []))
-            payload["history"] = history[-4:]
-            payload["memoryBrief"] = str(payload.get("memoryBrief", ""))[-500:]
-        elif artifact.kind == "context":
-            history = list(payload.get("modelHistory", []))
-            payload["modelHistory"] = history[-4:]
-            payload["retrievedKnowledge"] = list(payload.get("retrievedKnowledge", []))[:2]
-            payload["skillContext"] = str(payload.get("skillContext", ""))[:2000]
-            payload["longTermMemoryContext"] = str(payload.get("longTermMemoryContext", ""))[:800]
+        metadata = dict(artifact.metadata)
+        if artifact.kind in {"memory", "context"}:
+            metadata.update(
+                {
+                    "reactiveCompacted": True,
+                    "contextRecoveryAttempt": int(
+                        metadata.get("contextRecoveryAttempt", 0)
+                    )
+                    + 1,
+                }
+            )
         artifacts.append(
             AgentArtifact(
                 id=artifact.id,
                 owner=artifact.owner,
                 kind=artifact.kind,
-                payload=payload,
+                payload=artifact.payload,
                 confidence=artifact.confidence,
                 task_id=artifact.task_id,
-                metadata={**artifact.metadata, "reactiveCompacted": True},
+                metadata=metadata,
             )
         )
     return CollaborationBlackboard(
@@ -106,4 +140,12 @@ def compact_board_for_retry(board: CollaborationBlackboard) -> CollaborationBlac
         artifacts=tuple(artifacts),
         events=board.events,
         final_artifact_id=board.final_artifact_id,
+    )
+
+
+def has_reactive_context_retry(board: CollaborationBlackboard) -> bool:
+    return any(
+        artifact.kind in {"memory", "context"}
+        and bool(artifact.metadata.get("reactiveCompacted"))
+        for artifact in board.artifacts
     )

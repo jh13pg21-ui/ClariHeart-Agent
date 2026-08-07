@@ -15,6 +15,7 @@ from app.agents.events import (
     CollaborationBlackboard,
 )
 from app.agents.registry import AgentDecision, AgentProfile, AgentRegistry
+from app.llm.errors import ModelError, ModelErrorCode
 
 
 class SleepingAgent:
@@ -178,6 +179,105 @@ class AsyncAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(flaky.calls, 2)
         self.assertIsNotNone(result.latest_artifact("intent"))
         self.assertTrue(any(event.type == AgentEventType.TASK_RETRY_SCHEDULED for event in result.events))
+
+    async def test_context_overflow_retries_with_reactive_board_then_succeeds(self):
+        overflow = ModelError(
+            code=ModelErrorCode.PROMPT_TOO_LONG,
+            message="provider rejected oversized prompt",
+            retryable=True,
+            provider="ollama",
+            model="local-model",
+        )
+        flaky = FailingAgent("Flaky", "intent", 1, overflow)
+        board = CollaborationBlackboard(
+            turn_id="turn",
+            tasks={"task:Flaky": AgentTask(id="task:Flaky", title="Flaky", max_attempts=3)},
+        ).add_artifact(
+            AgentArtifact(
+                id="context",
+                owner="ContextAgent",
+                kind="context",
+                payload={"modelHistory": ["evidence"]},
+            )
+        )
+        settings = SimpleNamespace(
+            agent_max_rounds=1,
+            agent_max_claims_per_round=1,
+            agent_max_claims_per_agent=1,
+            agent_final_acceptance_min_confidence=0.6,
+            agent_task_max_attempts=3,
+            agent_task_timeout_seconds=1,
+            agent_retry_base_seconds=0,
+        )
+        coordinator_agent = SimpleNamespace(
+            name="CoordinatorAgent",
+            root_task=lambda current: AgentTask(id="task:root", title="root"),
+            remember_acceptance=lambda artifact_id, reason: None,
+        )
+
+        result = await EventDrivenCoordinator(
+            AgentRegistry([flaky]), coordinator_agent, settings
+        ).run(board)
+
+        self.assertEqual(flaky.calls, 2)
+        retry_context = flaky.round_boards[0].latest_artifact("context")
+        self.assertEqual(retry_context.payload["modelHistory"], ["evidence"])
+        self.assertTrue(retry_context.metadata["reactiveCompacted"])
+        self.assertIsNotNone(result.latest_artifact("intent"))
+
+    async def test_second_context_overflow_stops_without_retry_loop(self):
+        overflow = ModelError(
+            code=ModelErrorCode.PROMPT_TOO_LONG,
+            message="provider rejected oversized prompt",
+            retryable=True,
+            provider="ollama",
+            model="local-model",
+        )
+        failing = FailingAgent("Overflow", "intent", 10, overflow)
+        board = CollaborationBlackboard(
+            turn_id="turn",
+            tasks={
+                "task:Overflow": AgentTask(
+                    id="task:Overflow",
+                    title="Overflow",
+                    max_attempts=3,
+                )
+            },
+        ).add_artifact(
+            AgentArtifact(
+                id="context",
+                owner="ContextAgent",
+                kind="context",
+                payload={"modelHistory": ["evidence"]},
+            )
+        )
+        settings = SimpleNamespace(
+            agent_max_rounds=1,
+            agent_max_claims_per_round=1,
+            agent_max_claims_per_agent=1,
+            agent_final_acceptance_min_confidence=0.6,
+            agent_task_max_attempts=3,
+            agent_task_timeout_seconds=1,
+            agent_retry_base_seconds=0,
+        )
+        coordinator_agent = SimpleNamespace(
+            name="CoordinatorAgent",
+            root_task=lambda current: AgentTask(id="task:root", title="root"),
+            remember_acceptance=lambda artifact_id, reason: None,
+        )
+
+        result = await EventDrivenCoordinator(
+            AgentRegistry([failing]), coordinator_agent, settings
+        ).run(board)
+
+        self.assertEqual(failing.calls, 2)
+        self.assertEqual(result.tasks["task:Overflow"].status.value, "FAILED")
+        retry_events = [
+            event
+            for event in result.events
+            if event.type == AgentEventType.TASK_RETRY_SCHEDULED
+        ]
+        self.assertEqual(len(retry_events), 1)
 
 
 if __name__ == "__main__":

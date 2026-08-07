@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     model_recovery_jitter_ratio: float = 0.25
     model_recovery_max_continuations: int = 2
     model_stream_release_chars: int = 256
+    prompt_registry_enabled: bool = True
+    context_planner_enabled: bool = True
+    context_planner_shadow_mode: bool = False
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "mindbridge-qwen2.5-7b-ft:latest"
     finetuned_model_name: str = "mindbridge-qwen2.5-7b-ft:latest"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 import uuid
 from dataclasses import dataclass
@@ -22,7 +23,15 @@ from app.agents.events import (
 from app.agents.registry import AgentCapability, AgentDecision, AgentProfile
 from app.core.config import Settings
 from app.core.enums import IntentType, RiskLevel
-from app.llm.errors import ModelError
+from app.context.contracts import ContextEnvelope, ContextPlan, ContextSection
+from app.context.compaction import CompactionEngine
+from app.context.planner import ContextPlanner
+from app.context.tokens import TokenEstimatorRegistry
+from app.llm.capabilities import ModelCapabilitiesRegistry
+from app.llm.errors import ModelError, ModelErrorCode
+from app.prompts.assembler import AssembledPrompt, PromptAssembler, PromptRequest
+from app.prompts.registry import default_prompt_registry
+from app.prompts.runtime import registered_complete
 from app.schemas.dtos import AiMessage
 from app.services.agent_models import AgentModelRegistry
 from app.services.ai import AiClient, PromptTemplates, has_consult_signal, has_high_risk_signal
@@ -124,10 +133,7 @@ class UnderstandingAgent(BaseAutonomousAgent):
     profile = AgentProfile(
         name="UnderstandingAgent",
         capabilities=frozenset({AgentCapability.UNDERSTANDING}),
-        system_prompt=(
-            "你是 UnderstandingAgent。你只负责理解用户当前请求，输出意图、主题、置信度和理由，"
-            "不生成最终回复，不做风险处置。"
-        ),
+        prompt_id="agent.understanding",
         memory_policy="private_intent_history",
         model_profile="understanding",
         tool_permissions=frozenset({"llm.intent"}),
@@ -184,7 +190,7 @@ class UnderstandingAgent(BaseAutonomousAgent):
                 AiMessage(
                     role="system",
                     content=(
-                        f"{self.profile.system_prompt}\n"
+                        f"{default_prompt_registry().render(self.profile.prompt_id).content}\n"
                         f"私有记忆：\n{memory_context or '无'}\n"
                         f"跨会话长期记忆：\n{_long_term_memory_context(board)}"
                     ),
@@ -216,10 +222,7 @@ class SafetyAgent(BaseAutonomousAgent):
     profile = AgentProfile(
         name="SafetyAgent",
         capabilities=frozenset({AgentCapability.SAFETY}),
-        system_prompt=(
-            "你是 SafetyAgent。你独立评估风险，并审查候选回复是否安全。"
-            "你可以发布 SAFETY_OVERRIDE；你不生成最终回复。"
-        ),
+        prompt_id="agent.safety",
         memory_policy="private_safety_ledger",
         model_profile="safety",
         tool_permissions=frozenset({"llm.risk", "rules.high_risk", "response.review"}),
@@ -355,10 +358,7 @@ class ContextAgent(BaseAutonomousAgent):
     profile = AgentProfile(
         name="ContextAgent",
         capabilities=frozenset({AgentCapability.CONTEXT}),
-        system_prompt=(
-            "你是 ContextAgent。你只负责为本轮协作提供上下文，包括私有记忆、会话摘要、RAG 证据和 skill 约束。"
-            "你不判断最终答案是否可采纳。"
-        ),
+        prompt_id="agent.context",
         memory_policy="private_context_memory",
         model_profile="context",
         tool_permissions=frozenset({
@@ -477,10 +477,13 @@ class ContextAgent(BaseAutonomousAgent):
 
     async def _rewrite_query(self, memory_brief: str, model_input: str) -> str:
         try:
-            query = (await self.client().complete([
-                AiMessage(role="system", content=f"{self.profile.system_prompt}\n把学生输入改写成适合检索校园心理知识库的中文查询词，只输出查询词。"),
-                AiMessage(role="user", content=f"记忆摘要：\n{memory_brief}\n\n当前输入：\n{model_input}"),
-            ])).strip()
+            query = (await registered_complete(
+                self.client(),
+                agent_name=self.name,
+                agent_prompt_id=self.profile.prompt_id,
+                task_name="query_rewrite",
+                payload={"memoryBrief": memory_brief, "currentInput": model_input},
+            )).strip()
             return (query or model_input)[:60]
         except Exception:
             return model_input[:60]
@@ -498,10 +501,7 @@ class ResponseAgent(BaseAutonomousAgent):
     profile = AgentProfile(
         name="ResponseAgent",
         capabilities=frozenset({AgentCapability.RESPONSE}),
-        system_prompt=(
-            "你是 ResponseAgent。你根据黑板上的意图、风险、上下文和安全约束提出候选回复 prompt，"
-            "但最终是否采纳由 CoordinatorAgent 决定。"
-        ),
+        prompt_id="agent.response",
         memory_policy="private_response_strategy",
         model_profile="response",
         tool_permissions=frozenset({"llm.response_plan"}),
@@ -554,7 +554,7 @@ class ResponseAgent(BaseAutonomousAgent):
                 AiMessage(
                     role="system",
                     content=(
-                        f"{self.profile.system_prompt}\n"
+                        f"{default_prompt_registry().render(self.profile.prompt_id, {'mode': 'normal_chat', 'locale': 'zh-CN'}).content}\n"
                         f"当前由 ResponseAgent 以 normal_chat mode 提出回复方案。\n"
                         f"私有记忆：\n{_format_private_memory(self.private_memory())}\n"
                         f"会话记忆摘要：\n{memory_brief}\n"
@@ -577,7 +577,7 @@ class ResponseAgent(BaseAutonomousAgent):
                 AiMessage(
                     role="system",
                     content=(
-                        f"{self.profile.system_prompt}\n"
+                        f"{default_prompt_registry().render(self.profile.prompt_id, {'mode': 'support', 'locale': 'zh-CN'}).content}\n"
                         f"当前由 ResponseAgent 以 support mode 提出回复方案。\n"
                         f"私有记忆：\n{_format_private_memory(self.private_memory())}\n"
                         f"会话记忆摘要：\n{memory_brief}\n"
@@ -589,6 +589,28 @@ class ResponseAgent(BaseAutonomousAgent):
             ]
             mode = "support"
         profile = self.services.model_registry.profile_for(self.name)
+        context_plan: ContextPlan | None = None
+        assembled_prompt: AssembledPrompt | None = None
+        if (
+            bool(getattr(self.services.settings, "prompt_registry_enabled", True))
+            and bool(getattr(self.services.settings, "context_planner_enabled", True))
+        ):
+            assembled_prompt, context_plan = self._plan_response_prompt(
+                task=task,
+                board=board,
+                profile=profile,
+                mode=mode,
+                risk=risk,
+                model_history=model_history,
+                memory_brief=memory_brief,
+                long_term_context=long_term_context,
+                knowledge=knowledge,
+                skill_context=skill_context,
+            )
+            if not bool(
+                getattr(self.services.settings, "context_planner_shadow_mode", False)
+            ):
+                messages = list(assembled_prompt.messages)
         started = time.perf_counter()
         generation_status = "generated"
         failure_code = ""
@@ -606,8 +628,15 @@ class ResponseAgent(BaseAutonomousAgent):
             "task_name": task.id,
             "risk_level": risk,
             "cloud_egress_allowed": cloud_egress_allowed,
-            "context_section_ids": tuple(
-                f"response-message-{index}" for index in range(len(messages))
+            "context_section_ids": (
+                assembled_prompt.context_section_ids
+                if assembled_prompt is not None
+                else tuple(f"response-message-{index}" for index in range(len(messages)))
+            ),
+            "prompt_manifest_hash": (
+                assembled_prompt.manifest.manifest_hash
+                if assembled_prompt is not None
+                else ""
             ),
         }
         client = self.client()
@@ -660,6 +689,8 @@ class ResponseAgent(BaseAutonomousAgent):
                 else:
                     text = (await client.complete(messages, **model_metadata)).strip()
         except ModelError as error:
+            if error.code == ModelErrorCode.PROMPT_TOO_LONG:
+                raise
             text = safe_fallback(risk)
             generation_status = "fallback"
             failure_code = error.code.value
@@ -700,6 +731,18 @@ class ResponseAgent(BaseAutonomousAgent):
                             prompt_summary.encode("utf-8")
                         ).hexdigest(),
                         "revisionOf": task.metadata.get("revisionOf", ""),
+                        "promptManifestHash": (
+                            assembled_prompt.manifest.manifest_hash
+                            if assembled_prompt is not None
+                            else ""
+                        ),
+                        "contextPlanHash": context_plan.plan_hash if context_plan else "",
+                        "contextTokensBefore": context_plan.tokens_before if context_plan else 0,
+                        "contextTokensAfter": context_plan.tokens_after if context_plan else 0,
+                        "inputBudget": context_plan.input_budget if context_plan else 0,
+                        "contextDroppedSectionIds": list(context_plan.dropped_section_ids) if context_plan else [],
+                        "contextReactive": context_plan.reactive if context_plan else False,
+                        "contextPlanStatus": context_plan.status if context_plan else "",
                     },
                 ),
             ),
@@ -715,14 +758,232 @@ class ResponseAgent(BaseAutonomousAgent):
             ),
         )
 
+    def _plan_response_prompt(
+        self,
+        *,
+        task: AgentTask,
+        board: CollaborationBlackboard,
+        profile,
+        mode: str,
+        risk: RiskLevel,
+        model_history: list[AiMessage],
+        memory_brief: str,
+        long_term_context: str,
+        knowledge: list[Any],
+        skill_context: str,
+    ) -> tuple[AssembledPrompt, ContextPlan]:
+        settings = self.services.settings
+        capabilities = ModelCapabilitiesRegistry(settings).for_model(
+            profile.provider,
+            profile.model,
+        )
+        estimator = TokenEstimatorRegistry(settings).for_model(capabilities)
+        registry = default_prompt_registry()
+        identity = registry.render("global.identity").content
+        privacy = registry.render("global.privacy_boundary").content
+        safety = registry.render("global.safety_boundary").content
+        agent_contract = registry.render(
+            self.profile.prompt_id,
+            {"mode": mode, "locale": "zh-CN"},
+        ).content
+        task_contract = registry.render("task.response_generation").content
+        sections: list[ContextSection] = [
+            ContextSection(
+                id="global.identity",
+                category="global",
+                content=identity + "\n" + privacy,
+                priority=100,
+                required=True,
+                trust="TRUSTED_INSTRUCTION",
+                loading_reason="prompt_registry",
+                emit=False,
+            ),
+            ContextSection(
+                id="global.safety",
+                category="global",
+                content=safety,
+                priority=100,
+                required=True,
+                trust="TRUSTED_INSTRUCTION",
+                sensitivity=RiskLevel.HIGH,
+                loading_reason="prompt_registry",
+                emit=False,
+            ),
+            ContextSection(
+                id="agent.contract",
+                category="agent",
+                content=agent_contract + "\n" + task_contract,
+                priority=100,
+                required=True,
+                trust="TRUSTED_INSTRUCTION",
+                loading_reason="prompt_registry",
+                emit=False,
+            ),
+        ]
+
+        history = list(model_history)
+        if (
+            history
+            and history[-1].role.lower() == "user"
+            and history[-1].content == board.model_input
+        ):
+            history.pop()
+        latest = history[-2:]
+        older = history[:-2]
+        for index, message in enumerate(older):
+            normalized_role = message.role.lower()
+            sections.append(
+                ContextSection(
+                    id=f"conversation.history.{index:04d}",
+                    category="conversation",
+                    content=message.content,
+                    priority=min(75, 40 + index),
+                    trust="UNTRUSTED_DATA",
+                    message_role=(
+                        normalized_role
+                        if normalized_role in {"user", "assistant"}
+                        else ""
+                    ),
+                    loading_reason="recent_conversation",
+                )
+            )
+        if latest:
+            sections.append(
+                ContextSection(
+                    id="conversation.latest_turn",
+                    category="conversation",
+                    content=json.dumps(
+                        [message.model_dump() for message in latest],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    priority=95,
+                    trust="UNTRUSTED_DATA",
+                    loading_reason="latest_completed_turn",
+                )
+            )
+        if memory_brief and memory_brief != "无相关历史记忆。":
+            sections.append(
+                ContextSection(
+                    id="conversation.summary",
+                    category="conversation",
+                    content=memory_brief,
+                    priority=90,
+                    trust="UNTRUSTED_DATA",
+                    loading_reason="structured_conversation_summary",
+                )
+            )
+        if long_term_context and long_term_context != "无相关长期记忆。":
+            sections.append(
+                ContextSection(
+                    id="memory.long_term",
+                    category="memory",
+                    content=long_term_context,
+                    priority=70,
+                    trust="UNTRUSTED_DATA",
+                    sensitivity=risk,
+                    loading_reason="long_term_memory_selection",
+                )
+            )
+        if self.services.user.display_name:
+            sections.append(
+                ContextSection(
+                    id="profile.display_name",
+                    category="profile",
+                    content=str(self.services.user.display_name),
+                    priority=30,
+                    trust="UNTRUSTED_DATA",
+                    loading_reason="authenticated_profile",
+                )
+            )
+        for index, item in enumerate(knowledge):
+            source = str(getattr(item, "source", f"rag-{index + 1}"))
+            content = str(getattr(item, "content", ""))
+            if content:
+                sections.append(
+                    ContextSection(
+                        id="rag.top1" if index == 0 else f"rag.{index + 1}",
+                        category="rag",
+                        content=content,
+                        priority=max(40, 85 - index),
+                        trust="UNTRUSTED_DATA",
+                        provenance_ids=(source,),
+                        loading_reason="knowledge_retrieval",
+                    )
+                )
+        if skill_context:
+            sections.append(
+                ContextSection(
+                    id="skill.mandatory",
+                    category="skill",
+                    content=skill_context,
+                    priority=98 if risk == RiskLevel.HIGH else 80,
+                    required=risk == RiskLevel.HIGH,
+                    trust="UNTRUSTED_DATA",
+                    sensitivity=risk,
+                    loading_reason="risk_aware_skill_selection",
+                )
+            )
+        sections.append(
+            ContextSection(
+                id="user.current",
+                category="user",
+                content=board.model_input,
+                priority=100,
+                required=True,
+                trust="UNTRUSTED_DATA",
+                sensitivity=risk,
+                loading_reason="current_sanitized_input",
+            )
+        )
+        request_id = f"{board.turn_id}:{task.id}"
+        envelope = ContextEnvelope(
+            request_id=request_id,
+            session_id=str(board.session_id),
+            agent_name=self.name,
+            task_name="response_generation",
+            sections=tuple(sections),
+            risk_level=risk,
+        )
+        planner = ContextPlanner(
+            estimator,
+            reserve_tokens=int(getattr(settings, "model_recovery_reserve_tokens", 1024)),
+            margin_ratio=float(getattr(settings, "model_provider_safety_margin_ratio", 0.10)),
+        )
+        requested_output = max(
+            1,
+            int(getattr(profile, "max_tokens", getattr(settings, "ai_max_tokens", 512))),
+        )
+        context_artifact = board.latest_artifact("context")
+        reactive = bool(
+            context_artifact
+            and context_artifact.metadata.get("reactiveCompacted")
+        )
+        plan = (
+            CompactionEngine(planner).reactive_plan(envelope, capabilities)
+            if reactive
+            else planner.plan(envelope, capabilities, requested_output)
+        )
+        assembled = PromptAssembler(registry, estimator).assemble(
+            PromptRequest(
+                request_id=request_id,
+                agent_name=self.name,
+                task_name="response_generation",
+                agent_prompt_id=self.profile.prompt_id,
+                task_prompt_id="task.response_generation",
+                mode=mode,
+                locale="zh-CN",
+            ),
+            plan,
+        )
+        return assembled, plan
+
 
 class CoordinatorAgent(BaseAutonomousAgent):
     profile = AgentProfile(
         name="CoordinatorAgent",
         capabilities=frozenset({AgentCapability.COORDINATION}),
-        system_prompt=(
-            "你是 CoordinatorAgent。你不规定固定 Agent 顺序；你只维护任务板、预算、安全门槛、冲突仲裁和最终采纳。"
-        ),
+        prompt_id="agent.coordinator",
         memory_policy="private_coordination_trace",
         model_profile="coordinator",
         tool_permissions=frozenset({"taskboard.write", "blackboard.accept"}),

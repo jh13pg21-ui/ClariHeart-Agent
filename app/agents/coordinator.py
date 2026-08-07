@@ -19,6 +19,7 @@ from app.agents.recovery import (
     AgentFailureKind,
     classify_agent_error,
     compact_board_for_retry,
+    has_reactive_context_retry,
     retry_delay,
 )
 from app.agents.registry import AgentCapability, AgentRegistry
@@ -136,7 +137,11 @@ class EventDrivenCoordinator:
                     raise
                 failure = classify_agent_error(exc)
                 error = f"{failure.error_type}: {failure.message}"[:1000]
-                if failure.retryable and attempt < max_attempts:
+                retryable = failure.retryable and not (
+                    failure.kind == AgentFailureKind.CONTEXT_OVERFLOW
+                    and has_reactive_context_retry(attempt_board)
+                )
+                if retryable and attempt < max_attempts:
                     retry_events.append(
                         AgentEvent(
                             type=AgentEventType.TASK_RETRY_SCHEDULED,
@@ -151,7 +156,7 @@ class EventDrivenCoordinator:
                         )
                     )
                     if failure.kind == AgentFailureKind.CONTEXT_OVERFLOW:
-                        attempt_board = compact_board_for_retry(round_board)
+                        attempt_board = compact_board_for_retry(attempt_board)
                     delay = retry_delay(
                         attempt,
                         self.retry_base_seconds,

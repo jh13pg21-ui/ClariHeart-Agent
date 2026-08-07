@@ -113,7 +113,7 @@ class ConversationMemoryRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         prompt = "\n".join(message.content for message in client.calls[0])
         self.assertIn("詹姆斯哈登", prompt)
-        self.assertIn("当前输入：\n是", prompt)
+        self.assertIn('"currentInput":"是"', prompt)
 
     async def test_safety_history_contains_memory_before_current_follow_up(self):
         history = _context_history(memory_board("安慰一下"))

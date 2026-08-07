@@ -87,6 +87,8 @@ class PromptAssembler:
         history: list[ContextSection] = []
         current: ContextSection | None = None
         for section in context_plan.sections:
+            if not section.emit:
+                continue
             if section.id == "user.current":
                 current = section
             elif section.category == "conversation" and section.message_role:
@@ -123,6 +125,7 @@ class PromptAssembler:
                     "provenance": list(section.provenance_ids),
                 }
                 for section in context_plan.sections
+                if section.emit
             ],
             ensure_ascii=False,
             sort_keys=True,
