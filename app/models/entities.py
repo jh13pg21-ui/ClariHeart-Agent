@@ -123,6 +123,12 @@ class LongTermMemory(Base):
             "status",
             "updated_at",
         ),
+        Index(
+            "ix_long_term_memories_user_key_status",
+            "user_id",
+            "memory_key",
+            "status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -176,6 +182,31 @@ class LongTermMemory(Base):
         nullable=True,
         index=True,
     )
+    memory_key: Mapped[str] = mapped_column(String(191), default="", index=True)
+    conflict_group_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    consolidated_from_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    resolution_reason: Mapped[str] = mapped_column(Text, default="")
+
+
+class MemoryDreamState(Base):
+    __tablename__ = "memory_dream_states"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_memory_dream_states_user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("user_accounts.id"),
+        index=True,
+    )
+    last_scanned_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_consolidated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_owner: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    lease_acquired_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
 class KnowledgeChunk(Base):

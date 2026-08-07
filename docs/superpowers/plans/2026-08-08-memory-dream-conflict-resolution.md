@@ -23,7 +23,6 @@
 **Files:**
 - Modify: `app/models/entities.py`
 - Create: `migrations/versions/0011_memory_dream_v3.py`
-- Modify: `migrations/legacy_schema.py`
 - Test: `tests/test_memory_dream_v3_migration.py`
 
 **Interfaces:**
@@ -32,7 +31,7 @@
 
 - [ ] Write migration/model tests for defaults, indexes, foreign keys and SQLite upgrade.
 - [ ] Run the migration test and confirm it fails because V3 fields/table do not exist.
-- [ ] Add ORM fields, new state model, portable Alembic upgrade/downgrade and legacy schema parity.
+- [ ] Add ORM fields, new state model and portable Alembic upgrade/downgrade while preserving the frozen legacy schema.
 - [ ] Run migration/model tests to green.
 
 ### Task 2: Candidate V3 and write-time conflict arbitration
