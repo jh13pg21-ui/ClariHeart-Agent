@@ -19,10 +19,12 @@ from app.llm.providers import OllamaProvider, OpenAICompatibleProvider
 from app.llm.recovery import RecoveryPolicy
 from app.prompts.assembler import PromptAssembler, PromptRequest
 from app.prompts.registry import default_prompt_registry
+from app.prompts.release import PROMPT_RELEASE
 from app.prompts.runtime import registered_task_messages, render_registered_prefix
 from app.schemas.dtos import AiMessage
 from app.services.privacy import PrivacySanitizer
 from app.services.risk_rules import detect_risk_signal
+from app.services.model_trace import ModelTraceSink
 
 
 class PromptTemplates:
@@ -114,6 +116,7 @@ class AiClient:
         http_client: httpx.AsyncClient | None = None,
         *,
         gateway: ModelGateway | None = None,
+        trace_sink: ModelTraceSink | None = None,
     ):
         self.settings = settings
         self._owns_http_client = http_client is None
@@ -123,6 +126,7 @@ class AiClient:
         self._capabilities_registry = ModelCapabilitiesRegistry(self.settings)
         self._estimator_registry = TokenEstimatorRegistry(self.settings)
         self._prompt_registry = default_prompt_registry()
+        self._trace_sink = trace_sink
         self.gateway = gateway or self._build_gateway()
         self._sanitizer = PrivacySanitizer()
 
@@ -144,6 +148,8 @@ class AiClient:
         context_section_ids: tuple[str, ...] = (),
         output_schema_id: str = "",
         prompt_manifest_hash: str = "",
+        context_plan_hash: str = "",
+        prompt_release: str = PROMPT_RELEASE,
     ) -> ModelResult:
         request = self._request(
             messages,
@@ -154,6 +160,8 @@ class AiClient:
             context_section_ids=context_section_ids,
             output_schema_id=output_schema_id,
             prompt_manifest_hash=prompt_manifest_hash,
+            context_plan_hash=context_plan_hash,
+            prompt_release=prompt_release,
             stream=False,
         )
         return await self.gateway.complete(request)
@@ -224,6 +232,7 @@ class AiClient:
             context_section_ids=assembled.context_section_ids,
             output_schema_id=definition.output_schema_id,
             prompt_manifest_hash=assembled.manifest.manifest_hash,
+            context_plan_hash=plan.plan_hash,
         )
 
     async def stream(
@@ -246,6 +255,8 @@ class AiClient:
         context_section_ids: tuple[str, ...] = (),
         output_schema_id: str = "",
         prompt_manifest_hash: str = "",
+        context_plan_hash: str = "",
+        prompt_release: str = PROMPT_RELEASE,
         reviewer: StreamReviewer | None = None,
         on_replace: ReplaceCallback | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
@@ -258,6 +269,8 @@ class AiClient:
             context_section_ids=context_section_ids,
             output_schema_id=output_schema_id,
             prompt_manifest_hash=prompt_manifest_hash,
+            context_plan_hash=context_plan_hash,
+            prompt_release=prompt_release,
             stream=True,
         )
         async for event in self.gateway.stream(
@@ -282,6 +295,8 @@ class AiClient:
         context_section_ids: tuple[str, ...],
         output_schema_id: str,
         prompt_manifest_hash: str,
+        context_plan_hash: str,
+        prompt_release: str,
         stream: bool,
     ) -> ModelRequest:
         provider = self._provider_name()
@@ -317,6 +332,8 @@ class AiClient:
             cloud_egress_allowed=allow_cloud,
             sanitized=allow_cloud,
             context_section_ids=section_ids,
+            context_plan_hash=context_plan_hash,
+            prompt_release=prompt_release,
         )
 
     def _build_gateway(self) -> ModelGateway:
@@ -369,6 +386,7 @@ class AiClient:
             stream_release_chars=int(
                 getattr(self.settings, "model_stream_release_chars", 256)
             ),
+            trace_sink=self._trace_sink,
         )
 
     def _provider_name(self) -> str:

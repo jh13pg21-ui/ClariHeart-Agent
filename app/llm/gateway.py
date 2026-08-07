@@ -22,6 +22,11 @@ from app.llm.recovery import (
     RecoveryPolicy,
     Sleep,
 )
+from app.services.model_trace import (
+    ModelTraceEvent,
+    ModelTraceSink,
+    NullModelTraceSink,
+)
 
 
 _FALLBACK_CODES = frozenset(
@@ -55,6 +60,7 @@ class ModelGateway:
         clock: Callable[[], float] = time.monotonic,
         random_source: Callable[[], float] = random.random,
         on_event: EventCallback | None = None,
+        trace_sink: ModelTraceSink | None = None,
     ) -> None:
         self.providers = {
             str(name).strip().lower(): provider for name, provider in providers.items()
@@ -71,8 +77,66 @@ class ModelGateway:
         self._clock = clock
         self._random = random_source
         self._on_event = on_event
+        self._trace_sink = trace_sink or NullModelTraceSink()
+        self._active_requests: dict[str, ModelRequest] = {}
 
     async def complete(self, request: ModelRequest) -> ModelResult:
+        started = self._clock()
+        self._active_requests[request.request_id] = request
+        await self._trace(
+            self._trace_event(
+                "start",
+                request,
+                provider=request.preferred_provider,
+                model=request.preferred_model,
+                route="primary",
+            )
+        )
+        try:
+            result = await self._complete_routed(request)
+        except ModelError as error:
+            await self._trace(
+                self._trace_event(
+                    "failure",
+                    request,
+                    provider=error.provider,
+                    model=error.model,
+                    route=(
+                        "cloud_fallback"
+                        if error.provider == self.cloud_provider
+                        else "primary"
+                    ),
+                    error_code=error.code.value,
+                    latency_ms=max(0.0, (self._clock() - started) * 1000),
+                    attempt=error.attempt,
+                )
+            )
+            raise
+        else:
+            await self._trace(
+                self._trace_event(
+                    "success",
+                    request,
+                    provider=result.provider,
+                    model=result.model,
+                    route=(
+                        "cloud_fallback"
+                        if result.provider == self.cloud_provider
+                        else "primary"
+                    ),
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                    latency_ms=max(
+                        float(result.latency_ms or 0.0),
+                        max(0.0, (self._clock() - started) * 1000),
+                    ),
+                )
+            )
+            return result
+        finally:
+            self._active_requests.pop(request.request_id, None)
+
+    async def _complete_routed(self, request: ModelRequest) -> ModelResult:
         provider_name = request.preferred_provider.strip().lower()
         provider = self.providers.get(provider_name)
         if provider is None:
@@ -125,6 +189,65 @@ class ModelGateway:
             return await self._complete_on(cloud, cloud_request, deadline)
 
     async def stream(
+        self,
+        request: ModelRequest,
+        *,
+        reviewer: StreamReviewer | None = None,
+        on_replace: ReplaceCallback | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        started = self._clock()
+        self._active_requests[request.request_id] = request
+        await self._trace(
+            self._trace_event(
+                "stream_start",
+                request,
+                provider=request.preferred_provider,
+                model=request.preferred_model,
+                route="primary",
+            )
+        )
+        input_tokens = output_tokens = 0
+        try:
+            async for event in self._stream_routed(
+                request,
+                reviewer=reviewer,
+                on_replace=on_replace,
+            ):
+                input_tokens = max(input_tokens, int(event.input_tokens or 0))
+                output_tokens = max(output_tokens, int(event.output_tokens or 0))
+                yield event
+        except ModelError as error:
+            await self._trace(
+                self._trace_event(
+                    "stream_failure",
+                    request,
+                    provider=error.provider,
+                    model=error.model,
+                    route=(
+                        "cloud_fallback"
+                        if error.provider == self.cloud_provider
+                        else "primary"
+                    ),
+                    error_code=error.code.value,
+                    latency_ms=max(0.0, (self._clock() - started) * 1000),
+                    attempt=error.attempt,
+                )
+            )
+            raise
+        else:
+            await self._trace(
+                self._trace_event(
+                    "stream_success",
+                    request,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    latency_ms=max(0.0, (self._clock() - started) * 1000),
+                )
+            )
+        finally:
+            self._active_requests.pop(request.request_id, None)
+
+    async def _stream_routed(
         self,
         request: ModelRequest,
         *,
@@ -390,7 +513,7 @@ class ModelGateway:
             sleep=self._sleep,
             clock=self._clock,
             random_source=self._random,
-            on_event=self._on_event,
+            on_event=self._emit,
         )
         return await orchestrator.complete(request, deadline_at=deadline)
 
@@ -431,8 +554,61 @@ class ModelGateway:
         )
 
     async def _emit(self, event: RecoveryEvent) -> None:
+        request = self._active_requests.get(event.request_id)
+        if request is not None:
+            await self._trace(
+                self._trace_event(
+                    event.kind,
+                    request,
+                    provider=event.provider,
+                    model=event.model,
+                    route=(
+                        "cloud_fallback"
+                        if event.provider == self.cloud_provider
+                        else "primary"
+                    ),
+                    error_code=event.error_code,
+                    attempt=event.attempt,
+                )
+            )
         if self._on_event is None:
             return
         result: Any = self._on_event(event)
         if inspect.isawaitable(result):
             await result
+
+    async def _trace(self, event: ModelTraceEvent) -> None:
+        try:
+            result = self._trace_sink.record(event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            return
+
+    @staticmethod
+    def _trace_event(
+        kind: str,
+        request: ModelRequest,
+        **overrides,
+    ) -> ModelTraceEvent:
+        return ModelTraceEvent(
+            kind=kind,
+            request_id=request.request_id,
+            agent_name=request.agent_name,
+            task_name=request.task_name,
+            provider=str(overrides.get("provider", request.preferred_provider)),
+            model=str(overrides.get("model", request.preferred_model)),
+            risk_level=request.risk_level.value,
+            route=str(overrides.get("route", "primary")),
+            error_code=str(overrides.get("error_code", "")),
+            prompt_release=request.prompt_release,
+            prompt_manifest_hash=request.prompt_manifest_hash,
+            context_plan_hash=request.context_plan_hash,
+            context_section_count=len(request.context_section_ids),
+            input_tokens=int(overrides.get("input_tokens", 0) or 0),
+            output_tokens=int(overrides.get("output_tokens", 0) or 0),
+            latency_ms=float(overrides.get("latency_ms", 0.0) or 0.0),
+            attempt=int(overrides.get("attempt", 1) or 0),
+            cloud_egress=str(overrides.get("provider", request.preferred_provider)).lower()
+            == "openai",
+        )

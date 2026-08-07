@@ -23,6 +23,8 @@ class ModelRequest:
     cloud_egress_allowed: bool = False
     sanitized: bool = False
     context_section_ids: tuple[str, ...] = ()
+    prompt_release: str = ""
+    context_plan_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -49,4 +51,3 @@ class ModelStreamEvent:
     output_tokens: int = 0
     finish_reason: str = ""
     provider_request_id: str = ""
-

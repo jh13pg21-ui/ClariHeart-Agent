@@ -650,6 +650,7 @@ class ResponseAgent(BaseAutonomousAgent):
                 if assembled_prompt is not None
                 else ""
             ),
+            "context_plan_hash": context_plan.plan_hash if context_plan else "",
         }
         client = self.client()
         try:

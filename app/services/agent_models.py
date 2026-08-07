@@ -8,6 +8,7 @@ import httpx
 
 from app.core.config import Settings
 from app.services.ai import AiClient
+from app.services.model_trace import ModelTraceSink
 
 
 AGENT_MODEL_ALIASES = {
@@ -28,8 +29,13 @@ class AgentModelProfile:
 
 
 class AgentModelRegistry:
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        trace_sink: ModelTraceSink | None = None,
+    ):
         self.settings = settings
+        self.trace_sink = trace_sink
         self.http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(60.0, connect=5.0, read=45.0, write=15.0, pool=5.0)
         )
@@ -56,7 +62,11 @@ class AgentModelRegistry:
             settings.openai_model = profile.model
         else:
             settings.ollama_model = profile.model
-        client = AiClient(settings, http_client=self.http_client)
+        client = AiClient(
+            settings,
+            http_client=self.http_client,
+            trace_sink=self.trace_sink,
+        )
         self._clients[agent_name] = client
         return client
 

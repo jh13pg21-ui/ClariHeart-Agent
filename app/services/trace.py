@@ -13,6 +13,7 @@ from app.models.entities import AgentRunTrace, ChatSession, UserAccount
 from app.core.config import get_settings
 from app.services.data_protection import SensitiveTextProtector
 from app.services.privacy import PrivacySanitizer
+from app.services.trace_redaction import redact_collaboration_payload
 
 
 class AgentTraceService:
@@ -62,7 +63,11 @@ class AgentTraceService:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(_to_jsonable(value), ensure_ascii=False, default=str)
+    return json.dumps(
+        redact_collaboration_payload(_to_jsonable(value)),
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 def _agent_steps_with_collaboration(agent_run: AgentRunResult) -> list[Any]:

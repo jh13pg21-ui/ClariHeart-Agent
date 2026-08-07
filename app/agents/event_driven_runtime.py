@@ -29,6 +29,7 @@ from app.services.ai import AiClient, PromptTemplates
 from app.services.knowledge import KnowledgeService, SearchResult
 from app.services.long_term_memory import LongTermMemoryService
 from app.services.memory import RedisShortTermMemoryStore
+from app.services.model_trace import SqlModelTraceSink
 from app.services.output_safety import (
     OutputSafetyDecision,
     OutputSafetyStatus,
@@ -49,7 +50,8 @@ class EventDrivenAgentRuntimeService:
     def __init__(self, db: Session, settings: Settings):
         self.db = db
         self.settings = settings
-        self.ai = AiClient(settings)
+        trace_sink = SqlModelTraceSink(db)
+        self.ai = AiClient(settings, trace_sink=trace_sink)
         self.knowledge = KnowledgeService(db, settings)
         self.memory = RedisShortTermMemoryStore(settings)
         self.long_term_memory = LongTermMemoryService(
@@ -57,7 +59,7 @@ class EventDrivenAgentRuntimeService:
             settings,
             ai=self.ai,
         )
-        self.model_registry = AgentModelRegistry(settings)
+        self.model_registry = AgentModelRegistry(settings, trace_sink=trace_sink)
         self.private_memory = AgentPrivateMemory(settings)
 
     async def run(
