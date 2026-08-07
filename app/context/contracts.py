@@ -44,6 +44,7 @@ class ContextEnvelope:
     agent_name: str
     task_name: str
     sections: tuple[ContextSection, ...]
+    session_id: str = ""
     risk_level: RiskLevel = RiskLevel.LOW
     reactive: bool = False
 
@@ -73,6 +74,12 @@ class ContextPlan:
     dropped_section_ids: tuple[str, ...]
     plan_hash: str
     reactive: bool = False
+    session_id: str = ""
+    provider: str = ""
+    model: str = ""
+    reason: str = ""
+    status: str = "PLANNED"
+    watermark: str = ""
 
     @property
     def compacted(self) -> bool:

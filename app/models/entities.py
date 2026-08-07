@@ -352,6 +352,27 @@ class AgentRunTrace(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class ContextCompactionRecord(Base):
+    __tablename__ = "context_compaction_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    agent_name: Mapped[str] = mapped_column(String(128), index=True)
+    task_name: Mapped[str] = mapped_column(String(128), index=True)
+    provider: Mapped[str] = mapped_column(String(64), default="")
+    model: Mapped[str] = mapped_column(String(256), default="")
+    tokens_before: Mapped[int] = mapped_column(Integer)
+    tokens_after: Mapped[int] = mapped_column(Integer)
+    input_budget: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(String(128))
+    layers_json: Mapped[str] = mapped_column(Text, default="[]")
+    watermark: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    manifest_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class ToolAuditRecord(Base):
     __tablename__ = "tool_audit_records"
 

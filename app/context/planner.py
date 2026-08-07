@@ -173,6 +173,10 @@ class ContextPlanner:
             dropped_section_ids=tuple(dict.fromkeys(dropped)),
             plan_hash=plan_hash,
             reactive=envelope.reactive,
+            session_id=envelope.session_id,
+            provider=capabilities.provider,
+            model=capabilities.model,
+            watermark=plan_hash,
         )
 
     def _normalize(self, section: ContextSection) -> ContextSection:
