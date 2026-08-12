@@ -1,4 +1,4 @@
-# MindBridge Python
+# ClariHeart Agent
 
 ## 核心能力
 
@@ -129,7 +129,7 @@ REDIS_MEMORY_MAX_MESSAGES=40
 
 - `mysql`：MySQL 8.4，容器内端口 `3306`，宿主机映射 `13306`
 - `redis`：Redis 7，容器内端口 `6379`，宿主机映射 `16379`
-- `app`：MindBridge FastAPI 服务，宿主机端口 `8080`
+- `app`：ClariHeart Agent FastAPI 服务，宿主机端口 `8080`
 
 默认配置会让应用容器访问宿主机 Ollama：
 
@@ -206,7 +206,7 @@ SMTP_USE_TLS=true
 SMTP_USE_SSL=false
 ALERT_EMAIL_FROM=your-account@example.com
 ALERT_EMAIL_TO=counselor@example.com,admin@example.com
-ALERT_EMAIL_SUBJECT_PREFIX=[MindBridge 高风险预警]
+ALERT_EMAIL_SUBJECT_PREFIX=[ClariHeart Agent 高风险预警]
 ```
 
 未配置 SMTP 或收件人时，系统不会中断聊天流程，但会在 `alert_records` 中写入 `FAILED` 记录，提示缺少的配置项。
