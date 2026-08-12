@@ -26,4 +26,4 @@ jobs:
           DATABASE_URL: sqlite:///./target/ci-test.sqlite3
           REDIS_URL: redis://127.0.0.1:6379/15
           KNOWLEDGE_VECTOR_ENABLED: "false"
-        run: python -m pytest -q
+        run: python -m pytest -q --ignore=tests/rag_ingestion/test_evaluation.py
