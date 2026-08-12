@@ -14,6 +14,7 @@ from app.agents.events import (
 )
 from app.agents.registry import AgentCapability, AgentDecision, AgentProfile, AgentRegistry
 from app.services.agent_models import AgentModelRegistry
+from app.core.enums import IntentType, RiskLevel
 
 
 class EventDrivenProtocolTests(unittest.TestCase):
@@ -51,7 +52,7 @@ class DemoAgent:
     def decide(self, task, board):
         return AgentDecision(True, self.confidence, f"{self.profile.name} claims")
 
-    def act(self, task, board):
+    async def act(self, task, board):
         return AgentTurnResult(
             artifacts=(
                 AgentArtifact(
@@ -65,8 +66,8 @@ class DemoAgent:
         )
 
 
-class RegistryAndCoordinatorTests(unittest.TestCase):
-    def test_registry_sorts_by_claim_confidence_not_list_order(self):
+class RegistryAndCoordinatorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_registry_sorts_by_claim_confidence_not_list_order(self):
         low = DemoAgent("LowConfidenceAgent", AgentCapability.UNDERSTANDING, 0.2)
         high = DemoAgent("HighConfidenceAgent", AgentCapability.UNDERSTANDING, 0.9)
         registry = AgentRegistry([low, high])
@@ -76,7 +77,7 @@ class RegistryAndCoordinatorTests(unittest.TestCase):
 
         self.assertEqual([agent.profile.name for agent in candidates], ["HighConfidenceAgent", "LowConfidenceAgent"])
 
-    def test_coordinator_uses_claims_for_open_tasks(self):
+    async def test_coordinator_uses_claims_for_open_tasks(self):
         settings = SimpleNamespace(
             agent_max_rounds=1,
             agent_max_claims_per_round=2,
@@ -100,14 +101,61 @@ class RegistryAndCoordinatorTests(unittest.TestCase):
         ])
         board = CollaborationBlackboard(turn_id="t1", user_input="hello", model_input="hello")
 
-        result = EventDrivenCoordinator(registry, coordinator_agent, settings).run(board)
+        result = await EventDrivenCoordinator(registry, coordinator_agent, settings).run(board)
 
         claimed = [event.actor for event in result.events if event.type == AgentEventType.TASK_CLAIMED]
         self.assertIn("AgentA", claimed)
         self.assertIn("AgentB", claimed)
 
+    async def test_high_risk_response_waits_for_context_artifact(self):
+        settings = SimpleNamespace(
+            agent_max_rounds=1,
+            agent_max_claims_per_round=4,
+            agent_max_claims_per_agent=3,
+            agent_final_acceptance_min_confidence=0.6,
+        )
+        coordinator_agent = SimpleNamespace(
+            name="CoordinatorAgent",
+            root_task=lambda board: AgentTask(id="task:root", title="root"),
+            remember_acceptance=lambda artifact_id, reason: None,
+        )
+        coordinator = EventDrivenCoordinator(AgentRegistry([]), coordinator_agent, settings)
+        board = (
+            CollaborationBlackboard(turn_id="turn", user_input="我不想活了", model_input="我不想活了")
+            .add_artifact(AgentArtifact(id="memory", owner="ContextAgent", kind="memory", payload={"history": []}))
+            .add_artifact(AgentArtifact(id="intent", owner="UnderstandingAgent", kind="intent", payload={"intent": IntentType.CONSULT.value}))
+            .add_artifact(AgentArtifact(id="risk", owner="SafetyAgent", kind="risk", payload={"risk": RiskLevel.HIGH.value}))
+        )
+
+        pending_context = coordinator._derive_missing_work(board)
+
+        self.assertIn("task:gather-context", pending_context.tasks)
+        self.assertNotIn("task:propose-response", pending_context.tasks)
+
+        ready = pending_context.add_artifact(
+            AgentArtifact(id="context", owner="ContextAgent", kind="context", payload={"selectedSkills": ["high_risk_safety_plan"]})
+        )
+        ready = coordinator._derive_missing_work(ready)
+        self.assertIn("task:propose-response", ready.tasks)
+
 
 class AgentModelRegistryTests(unittest.TestCase):
+    def test_client_for_reuses_gateway_per_agent_profile(self):
+        settings = SimpleNamespace(
+            ai_provider="mock",
+            ollama_model="default-model",
+            openai_model="default-openai",
+            openai_api_key="",
+            ai_temperature=0.35,
+            ai_max_tokens=512,
+        )
+        registry = AgentModelRegistry(settings)
+
+        first = registry.client_for("ResponseAgent")
+        second = registry.client_for("ResponseAgent")
+
+        self.assertIs(first, second)
+
     def test_agent_can_override_model_without_changing_global_default(self):
         settings = SimpleNamespace(
             ai_provider="ollama",

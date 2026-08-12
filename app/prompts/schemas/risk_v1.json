@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "risk_v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["emotion", "emotionScore", "risk", "confidence", "summary"],
+  "properties": {
+    "emotion": {"type": "string", "enum": ["NORMAL", "ANXIETY", "DEPRESSED", "HIGH_RISK"]},
+    "emotionScore": {"type": "number", "minimum": 0, "maximum": 5},
+    "risk": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "summary": {"type": "string", "maxLength": 300}
+  }
+}

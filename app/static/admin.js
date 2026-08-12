@@ -1,8 +1,9 @@
-const AUTH_KEY = "mindbridge.auth";
-
 const state = {
   profile: null,
-  modelName: "mock"
+  modelName: "mock",
+  knowledgeJobs: [],
+  knowledgePollTimer: null,
+  knowledgeJobsLoading: false
 };
 
 const els = {
@@ -17,41 +18,41 @@ const els = {
   metricExcel: document.querySelector("#metricExcel"),
   metricAlerts: document.querySelector("#metricAlerts"),
   cases: document.querySelector("#cases"),
+  casesCount: document.querySelector("#casesCount"),
   reports: document.querySelector("#reports"),
+  reportsCount: document.querySelector("#reportsCount"),
   conversationState: document.querySelector("#conversationState"),
   conversationDetail: document.querySelector("#conversationDetail"),
   knowledgeState: document.querySelector("#knowledgeState"),
   knowledgeUploadForm: document.querySelector("#knowledgeUploadForm"),
   knowledgeFile: document.querySelector("#knowledgeFile"),
+  knowledgeSubmit: document.querySelector("#knowledgeSubmit"),
+  knowledgeVisionAllowed: document.querySelector("#knowledgeVisionAllowed"),
   knowledgeUploadState: document.querySelector("#knowledgeUploadState"),
+  knowledgeJobs: document.querySelector("#knowledgeJobs"),
+  knowledgeJobsCount: document.querySelector("#knowledgeJobsCount"),
+  refreshKnowledgeJobs: document.querySelector("#refreshKnowledgeJobs"),
   rebuildVector: document.querySelector("#rebuildVector"),
   backupVector: document.querySelector("#backupVector")
 };
 
-function readAuth() {
-  try {
-    return JSON.parse(sessionStorage.getItem(AUTH_KEY) || "null");
-  } catch {
-    return null;
-  }
-}
+const knowledgeUI = window.MindBridgeKnowledgeUI;
 
-function clearAuth() {
-  sessionStorage.removeItem(AUTH_KEY);
-}
-
-function authHeader() {
-  const auth = readAuth();
-  if (!auth?.token) {
-    window.location.replace("/");
-    return "";
-  }
-  return `Basic ${auth.token}`;
+function csrfToken() {
+  const cookie = document.cookie.split("; ").find((item) => item.startsWith("mindbridge_csrf="));
+  return cookie ? decodeURIComponent(cookie.split("=", 2)[1]) : "";
 }
 
 async function api(path, options = {}) {
-  const headers = { ...(options.headers || {}), Authorization: authHeader() };
-  const response = await fetch(path, { ...options, headers });
+  const headers = { ...(options.headers || {}) };
+  if (["POST", "PUT", "PATCH", "DELETE"].includes((options.method || "GET").toUpperCase())) {
+    headers["X-CSRF-Token"] = csrfToken();
+  }
+  const response = await fetch(path, { ...options, headers, credentials: "same-origin" });
+  if (response.status === 401) {
+    window.location.replace("/");
+    throw new Error("登录状态已失效");
+  }
   if (!response.ok) {
     const text = await response.text();
     throw new Error(text || `${response.status} ${response.statusText}`);
@@ -86,7 +87,7 @@ function roleLabel(role) {
 
 async function checkHealth() {
   try {
-    const response = await fetch("/actuator/health");
+    const response = await fetch("/actuator/health", { credentials: "same-origin" });
     const body = await response.json();
     setPill(els.serviceState, body.status === "UP" ? "服务正常" : `服务 ${body.status}`, body.status === "UP" ? "ok" : "danger");
   } catch {
@@ -106,7 +107,6 @@ async function loadProfile() {
     els.activeAccount.textContent = profile.displayName || profile.username;
     return profile;
   } catch {
-    clearAuth();
     window.location.replace("/");
     return null;
   }
@@ -139,6 +139,8 @@ async function loadAdminDashboard() {
   els.metricCases.textContent = cases.length;
   els.metricExcel.textContent = excel.length;
   els.metricAlerts.textContent = alerts.length;
+  els.casesCount.textContent = `${cases.length} 条`;
+  els.reportsCount.textContent = `${reports.length} 条`;
   renderCases(cases);
   renderReports(reports);
 }
@@ -223,6 +225,7 @@ async function loadConversation(sessionId) {
     els.conversationState.textContent = "该报告缺少会话 ID";
     return;
   }
+  window.MindBridgeAdminPanels.open(document, "archive", localStorage, { scroll: true });
   els.conversationState.textContent = "正在读取...";
   els.conversationDetail.innerHTML = `<div class="empty small"><strong>加载中</strong><p>正在读取历史消息。</p></div>`;
   for (const card of els.reports.querySelectorAll(".report")) {
@@ -285,15 +288,147 @@ async function uploadKnowledgeFile(event) {
   }
   const data = new FormData();
   data.append("file", file);
-  els.knowledgeUploadState.textContent = "正在切分入库...";
+  const allowVision = els.knowledgeVisionAllowed.checked;
+  const endpoint = `/api/admin/knowledge/files?cloudVisionAllowed=${allowVision}`;
+  els.knowledgeSubmit.disabled = true;
+  els.knowledgeUploadState.className = "knowledge-notice running";
+  els.knowledgeUploadState.textContent = `正在上传 ${file.name}；上传结束后页面不会等待解析...`;
   try {
-    const response = await api("/api/admin/knowledge/file", { method: "POST", body: data });
+    const response = await api(endpoint, { method: "POST", body: data });
     const result = await response.json();
-    els.knowledgeUploadState.textContent = `${result.source} 已入库 ${result.chunks} 个片段`;
+    els.knowledgeUploadState.className = "knowledge-notice accepted";
+    els.knowledgeUploadState.textContent = `${file.name} 已提交后台处理（任务 ${result.jobId}）。你可以继续其他操作。`;
     els.knowledgeFile.value = "";
-    loadKnowledgeStatus();
+    await loadKnowledgeJobs({ immediate: true });
   } catch (error) {
+    els.knowledgeUploadState.className = "knowledge-notice failed";
     els.knowledgeUploadState.textContent = `上传失败：${error.message}`;
+  } finally {
+    els.knowledgeSubmit.disabled = false;
+  }
+}
+
+function clearKnowledgePoll() {
+  if (state.knowledgePollTimer) {
+    window.clearTimeout(state.knowledgePollTimer);
+    state.knowledgePollTimer = null;
+  }
+}
+
+function scheduleKnowledgePoll() {
+  clearKnowledgePoll();
+  if (document.hidden || !knowledgeUI.shouldPoll(state.knowledgeJobs)) return;
+  state.knowledgePollTimer = window.setTimeout(() => loadKnowledgeJobs(), 3000);
+}
+
+async function loadKnowledgeJobs(options = {}) {
+  if (state.knowledgeJobsLoading) return;
+  state.knowledgeJobsLoading = true;
+  if (options.immediate) clearKnowledgePoll();
+  try {
+    const response = await api("/api/admin/knowledge/jobs?limit=50");
+    state.knowledgeJobs = await response.json();
+    renderKnowledgeJobs(state.knowledgeJobs);
+    if (!knowledgeUI.shouldPoll(state.knowledgeJobs)) loadKnowledgeStatus();
+  } catch (error) {
+    els.knowledgeJobs.innerHTML = "";
+    const message = document.createElement("div");
+    message.className = "empty small";
+    const title = document.createElement("strong");
+    title.textContent = "任务读取失败";
+    const detail = document.createElement("p");
+    detail.textContent = error.message;
+    message.append(title, detail);
+    els.knowledgeJobs.append(message);
+  } finally {
+    state.knowledgeJobsLoading = false;
+    scheduleKnowledgePoll();
+  }
+}
+
+function renderKnowledgeJobs(jobs) {
+  els.knowledgeJobs.innerHTML = "";
+  const activeCount = jobs.filter((job) => ["PENDING", "RUNNING"].includes(job.status)).length;
+  els.knowledgeJobsCount.textContent = activeCount ? `${activeCount} 个处理中` : `${jobs.length} 个任务`;
+  if (!jobs.length) {
+    els.knowledgeJobs.innerHTML = `<div class="empty small"><strong>暂无入库任务</strong><p>上传文档后，解析与索引进度会显示在这里。</p></div>`;
+    return;
+  }
+  for (const job of jobs) {
+    els.knowledgeJobs.append(createKnowledgeJobCard(job));
+  }
+}
+
+function createKnowledgeJobCard(job) {
+  const meta = knowledgeUI.statusMeta(job.status);
+  const article = document.createElement("article");
+  article.className = `knowledge-job ${meta.tone}`;
+
+  const head = document.createElement("div");
+  head.className = "knowledge-job-head";
+  const identity = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = job.displayName || "未命名文档";
+  const id = document.createElement("small");
+  id.textContent = `${job.jobId} · ${displayTime(job.createdAt)}`;
+  identity.append(title, id);
+  const badge = document.createElement("span");
+  badge.className = `knowledge-job-status ${meta.tone}`;
+  badge.textContent = meta.label;
+  head.append(identity, badge);
+
+  const progress = document.createElement("div");
+  progress.className = `knowledge-progress ${job.totalPages ? "" : "indeterminate"}`.trim();
+  const bar = document.createElement("span");
+  bar.style.width = `${knowledgeUI.progressPercent(job)}%`;
+  progress.append(bar);
+
+  const stage = document.createElement("div");
+  stage.className = "knowledge-job-stage";
+  const label = document.createElement("span");
+  label.textContent = knowledgeUI.progressLabel(job);
+  const attempts = document.createElement("span");
+  attempts.textContent = job.attempts ? `尝试 ${job.attempts} 次` : "尚未开始";
+  stage.append(label, attempts);
+
+  article.append(head, progress, stage);
+  if (job.error) {
+    const error = document.createElement("p");
+    error.className = "knowledge-job-error";
+    error.textContent = `${job.error.code || "处理异常"}：${job.error.message || "请稍后重试"}`;
+    article.append(error);
+  }
+  if (knowledgeUI.canRetry(job)) {
+    const actions = document.createElement("div");
+    actions.className = "knowledge-job-actions";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "ghost compact";
+    retry.textContent = knowledgeUI.retryNeedsVision(job) ? "授权 Vision 并重试" : "重新处理";
+    retry.addEventListener("click", () => retryKnowledgeJob(job, retry));
+    actions.append(retry);
+    article.append(actions);
+  }
+  return article;
+}
+
+async function retryKnowledgeJob(job, button) {
+  button.disabled = true;
+  const query = knowledgeUI.retryNeedsVision(job) ? "?cloudVisionAllowed=true" : "";
+  els.knowledgeUploadState.className = "knowledge-notice running";
+  els.knowledgeUploadState.textContent = `正在重新提交 ${job.displayName}...`;
+  try {
+    const response = await api(`/api/admin/knowledge/jobs/${encodeURIComponent(job.jobId)}/retry${query}`, {
+      method: "POST"
+    });
+    const result = await response.json();
+    els.knowledgeUploadState.className = "knowledge-notice accepted";
+    els.knowledgeUploadState.textContent = `${job.displayName} 已重新进入队列（任务 ${result.jobId}）。`;
+    await loadKnowledgeJobs({ immediate: true });
+  } catch (error) {
+    els.knowledgeUploadState.className = "knowledge-notice failed";
+    els.knowledgeUploadState.textContent = `重试失败：${error.message}`;
+    button.disabled = false;
   }
 }
 
@@ -319,24 +454,35 @@ async function runKnowledgeAction(kind) {
   }
 }
 
-function logout() {
-  clearAuth();
-  window.location.assign("/");
+async function logout() {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } finally {
+    window.location.assign("/");
+  }
 }
 
 els.switchAccount.addEventListener("click", logout);
 els.refreshAdmin.addEventListener("click", () => {
   loadAdminDashboard();
   loadKnowledgeStatus();
+  loadKnowledgeJobs({ immediate: true });
 });
 els.knowledgeUploadForm.addEventListener("submit", uploadKnowledgeFile);
+els.refreshKnowledgeJobs.addEventListener("click", () => loadKnowledgeJobs({ immediate: true }));
 els.rebuildVector.addEventListener("click", () => runKnowledgeAction("rebuild"));
 els.backupVector.addEventListener("click", () => runKnowledgeAction("backup"));
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) clearKnowledgePoll();
+  else loadKnowledgeJobs({ immediate: true });
+});
 
+window.MindBridgeAdminPanels.bind(document, localStorage);
 checkHealth();
 loadProfile().then((profile) => {
   if (!profile) return;
   loadAgentStatus();
   loadAdminDashboard();
   loadKnowledgeStatus();
+  loadKnowledgeJobs({ immediate: true });
 });

@@ -1,7 +1,7 @@
-from app.core.bootstrap import create_schema
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.models.entities import PsychologicalReport
+from app.core.enums import ToolJobKind
+from app.services.tool_commands import ToolCommandService
 from app.services.tools import ToolOrchestrationService
 
 try:
@@ -15,15 +15,13 @@ mcp = FastMCP("mindbridge-python-tools")
 
 @mcp.tool()
 def mindbridge_excel_report(report_id: int) -> str:
-    """Write one psychological risk report into the MindBridge Excel ledger."""
-    create_schema()
+    """Queue one psychological report for reliable Excel ledger delivery."""
     db = SessionLocal()
     try:
-        report = db.get(PsychologicalReport, report_id)
-        if report is None:
-            return f"report {report_id} not found"
-        record = ToolOrchestrationService(db, get_settings()).write_excel(report)
-        return f"success: {record.file_path}"
+        event = ToolCommandService(db, get_settings()).enqueue_report_command(report_id, ToolJobKind.EXCEL_REPORT.value)
+        return f"queued: eventId={event.event_id}, reportId={report_id}"
+    except (ValueError, PermissionError) as exc:
+        return str(exc)
     finally:
         db.close()
 
@@ -31,14 +29,12 @@ def mindbridge_excel_report(report_id: int) -> str:
 @mcp.tool()
 def mindbridge_case_create(report_id: int) -> str:
     """Create or return the active MindBridge risk case for one psychological report."""
-    create_schema()
     db = SessionLocal()
     try:
-        report = db.get(PsychologicalReport, report_id)
-        if report is None:
-            return f"report {report_id} not found"
-        case = ToolOrchestrationService(db, get_settings()).create_case(report)
-        return f"success: caseId={case.id}, reportId={case.report_id}, status={case.status}"
+        event = ToolCommandService(db, get_settings()).enqueue_report_command(report_id, ToolJobKind.CASE_CREATE.value)
+        return f"queued: eventId={event.event_id}, reportId={report_id}"
+    except (ValueError, PermissionError) as exc:
+        return str(exc)
     finally:
         db.close()
 
@@ -46,7 +42,6 @@ def mindbridge_case_create(report_id: int) -> str:
 @mcp.tool()
 def mindbridge_alert_send(case_id: int) -> str:
     """Send or record the counselor alert for one MindBridge risk case."""
-    create_schema()
     db = SessionLocal()
     try:
         from app.models.entities import RiskCase
@@ -54,8 +49,10 @@ def mindbridge_alert_send(case_id: int) -> str:
         case = db.get(RiskCase, case_id)
         if case is None:
             return f"case {case_id} not found"
-        record = ToolOrchestrationService(db, get_settings()).send_case_alert(case)
-        return f"{record.status}: caseId={case_id}, {record.channel} -> {record.recipient}: {record.message}"
+        event = ToolCommandService(db, get_settings()).enqueue_case_alert(case_id)
+        return f"queued: eventId={event.event_id}, caseId={case_id}"
+    except (ValueError, PermissionError) as exc:
+        return str(exc)
     finally:
         db.close()
 
@@ -63,12 +60,13 @@ def mindbridge_alert_send(case_id: int) -> str:
 @mcp.tool()
 def mindbridge_alert_ack(case_id: int, actor: str, note: str = "") -> str:
     """Mark a MindBridge risk case as acknowledged by a counselor or administrator."""
-    create_schema()
     db = SessionLocal()
     try:
-        case = ToolOrchestrationService(db, get_settings()).acknowledge_case(case_id, actor, note)
+        settings = get_settings()
+        safe_actor = ToolCommandService(db, settings).require_mcp_actor(actor)
+        case = ToolOrchestrationService(db, settings).acknowledge_case(case_id, safe_actor, note)
         return f"success: caseId={case.id}, status={case.status}, acknowledgedBy={case.acknowledged_by}"
-    except RuntimeError as exc:
+    except (RuntimeError, PermissionError) as exc:
         return str(exc)
     finally:
         db.close()
@@ -77,12 +75,13 @@ def mindbridge_alert_ack(case_id: int, actor: str, note: str = "") -> str:
 @mcp.tool()
 def mindbridge_case_note_add(case_id: int, actor: str, note: str) -> str:
     """Append a follow-up note to a MindBridge risk case."""
-    create_schema()
     db = SessionLocal()
     try:
-        record = ToolOrchestrationService(db, get_settings()).add_case_note(case_id, actor, note)
+        settings = get_settings()
+        safe_actor = ToolCommandService(db, settings).require_mcp_actor(actor)
+        record = ToolOrchestrationService(db, settings).add_case_note(case_id, safe_actor, note)
         return f"success: noteId={record.id}, caseId={record.case_id}"
-    except RuntimeError as exc:
+    except (RuntimeError, PermissionError) as exc:
         return str(exc)
     finally:
         db.close()
@@ -91,14 +90,12 @@ def mindbridge_case_note_add(case_id: int, actor: str, note: str) -> str:
 @mcp.tool()
 def mindbridge_alert_notify(report_id: int) -> str:
     """Send a high-risk alert email and record the notification result for one psychological report."""
-    create_schema()
     db = SessionLocal()
     try:
-        report = db.get(PsychologicalReport, report_id)
-        if report is None:
-            return f"report {report_id} not found"
-        record = ToolOrchestrationService(db, get_settings()).notify(report)
-        return f"{record.status}: {record.channel} -> {record.recipient}: {record.message}"
+        event = ToolCommandService(db, get_settings()).enqueue_report_command(report_id, ToolJobKind.ALERT_SEND.value)
+        return f"queued: eventId={event.event_id}, reportId={report_id}"
+    except (ValueError, PermissionError) as exc:
+        return str(exc)
     finally:
         db.close()
 

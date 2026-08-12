@@ -5,7 +5,9 @@ from dataclasses import dataclass
 
 from app.core.enums import EmotionLabel, RiskLevel
 from app.schemas.dtos import AiMessage
-from app.services.ai import AiClient, PromptTemplates, has_consult_signal, has_high_risk_signal
+from app.services.ai import AiClient, has_consult_signal, has_high_risk_signal
+from app.prompts.runtime import registered_complete
+from app.services.risk_rules import detect_risk_signal
 
 
 @dataclass
@@ -21,11 +23,22 @@ class PsychologicalAssessmentService:
     def __init__(self, ai: AiClient):
         self.ai = ai
 
-    def assess(self, text: str, history: list[AiMessage] | None = None) -> PsychologyAssessment:
-        if has_high_risk_signal(text):
-            return PsychologyAssessment(EmotionLabel.HIGH_RISK, 4.0, RiskLevel.HIGH, 0.95, "检测到明确高风险表达")
+    async def assess(self, text: str, history: list[AiMessage] | None = None) -> PsychologyAssessment:
+        rule = detect_risk_signal(text)
+        if rule.level == RiskLevel.HIGH:
+            return PsychologyAssessment(EmotionLabel.HIGH_RISK, 4.0, RiskLevel.HIGH, 0.97, rule.reason)
         try:
-            raw = self.ai.complete(PromptTemplates.psychology_prompt(history or [], text))
+            raw = await registered_complete(
+                self.ai,
+                agent_name="PsychologicalAssessmentService",
+                agent_prompt_id="agent.safety",
+                task_name="risk_assessment",
+                payload={
+                    "recentHistory": [message.model_dump() for message in (history or [])[-20:]],
+                    "currentInput": text,
+                },
+                risk_level=rule.level,
+            )
             start = raw.find("{")
             end = raw.rfind("}")
             data = json.loads(raw[start:end + 1] if start >= 0 and end > start else raw)
@@ -38,9 +51,20 @@ class PsychologicalAssessmentService:
                 risk = score_risk
             if emotion == EmotionLabel.HIGH_RISK:
                 risk = RiskLevel.HIGH
+            if rule.level == RiskLevel.MEDIUM and risk == RiskLevel.LOW:
+                risk = RiskLevel.MEDIUM
             return PsychologyAssessment(emotion, score, risk, confidence, data.get("summary", "模型评估结果"))
         except Exception:
-            return heuristic(text)
+            fallback = heuristic(text)
+            if rule.level == RiskLevel.MEDIUM and fallback.risk == RiskLevel.LOW:
+                return PsychologyAssessment(
+                    fallback.emotion,
+                    max(fallback.emotion_score, 3.0),
+                    RiskLevel.MEDIUM,
+                    0.82,
+                    rule.reason,
+                )
+            return fallback
 
 
 def heuristic(text: str) -> PsychologyAssessment:

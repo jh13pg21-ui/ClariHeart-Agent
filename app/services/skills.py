@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.enums import IntentType, RiskLevel
 from app.models.entities import PsychologicalReport, UserAccount
+from app.schemas.dtos import AiMessage
 
 
 class SkillLoadError(RuntimeError):
@@ -42,6 +44,13 @@ class MindBridgeSkill:
         return issues
 
 
+@dataclass(frozen=True)
+class SkillSelection:
+    names: tuple[str, ...]
+    strategy: str
+    semantic_error: str = ""
+
+
 class MindBridgeSkillRegistry:
     def __init__(self, root: Path | None = None):
         self.root = root or Path(__file__).resolve().parents[2] / "skills"
@@ -68,7 +77,7 @@ class MindBridgeSkillRegistry:
                         "name": skill_file.parent.name,
                         "status": "FAILED",
                         "description": str(exc),
-                        "path": str(skill_file.relative_to(self.root.parent)),
+                        "path": skill_file.relative_to(self.root.parent).as_posix(),
                         "issues": [{"level": "ERROR", "message": str(exc)}],
                     }
                 )
@@ -79,7 +88,7 @@ class MindBridgeSkillRegistry:
                     "name": skill.name,
                     "status": "FAILED" if has_error else "READY" if not issues else "WARN",
                     "description": skill.description,
-                    "path": str(skill.path.relative_to(self.root.parent)),
+                    "path": skill.path.relative_to(self.root.parent).as_posix(),
                     "issues": [{"level": issue.level, "message": issue.message} for issue in issues],
                     "metadata": skill.metadata,
                 }
@@ -114,6 +123,20 @@ class MindBridgeSkillRegistry:
 
 
 class MindBridgeSkillLibrary:
+    _MANDATORY_SUPPORT_SKILLS = (
+        "supportive_response_baseline",
+        "referral_resource_guidance",
+    )
+    _HIGH_RISK_SKILLS = (
+        "supportive_response_baseline",
+        "high_risk_safety_plan",
+    )
+    _OPTIONAL_RESPONSE_SKILLS = (
+        "anxiety_grounding_support",
+        "sleep_routine_support",
+        "academic_stress_planning",
+    )
+
     @staticmethod
     def registry() -> MindBridgeSkillRegistry:
         return MindBridgeSkillRegistry()
@@ -133,15 +156,91 @@ class MindBridgeSkillLibrary:
         return "\n\n".join(registry.get_required(name).prompt_context() for name in names)
 
     @staticmethod
+    async def select_response_skills(
+        intent: IntentType,
+        risk: RiskLevel,
+        text: str,
+        ai_client,
+        *,
+        semantic_enabled: bool = True,
+        max_optional: int = 2,
+    ) -> SkillSelection:
+        """选择学生端回复 Skill。
+
+        风险策略永远先于模型选择：普通聊天不加载，高风险固定加载安全计划；
+        只有普通心理支持场景允许模型从受控白名单中补充可选 Skill。
+        """
+        fallback_names = MindBridgeSkillLibrary.response_skill_names(intent, risk, text)
+        if intent == IntentType.CHAT and risk == RiskLevel.LOW:
+            return SkillSelection(tuple(fallback_names), "chat_skip")
+        if risk == RiskLevel.HIGH:
+            return SkillSelection(tuple(fallback_names), "high_risk_hard_guard")
+        if not semantic_enabled or ai_client is None:
+            return SkillSelection(tuple(fallback_names), "rule_only")
+
+        fallback_optional = [
+            name
+            for name in fallback_names
+            if name in MindBridgeSkillLibrary._OPTIONAL_RESPONSE_SKILLS
+        ][:max(0, max_optional)]
+        try:
+            semantic_names = await MindBridgeSkillLibrary._semantic_optional_skills(
+                text,
+                ai_client,
+                max_optional=max_optional,
+            )
+        except Exception as exc:
+            return SkillSelection(
+                tuple(fallback_names),
+                "rule_fallback",
+                f"{type(exc).__name__}: {exc}",
+            )
+
+        mandatory = list(MindBridgeSkillLibrary._MANDATORY_SUPPORT_SKILLS)
+        if semantic_names:
+            return SkillSelection(
+                tuple(_dedupe([*mandatory, *semantic_names])),
+                "semantic_ranked",
+            )
+        return SkillSelection(
+            tuple(_dedupe([*mandatory, *fallback_optional])),
+            "rule_fallback_empty",
+        )
+
+    @staticmethod
+    async def response_skill_context_async(
+        intent: IntentType,
+        risk: RiskLevel,
+        text: str,
+        ai_client,
+        *,
+        semantic_enabled: bool = True,
+        max_optional: int = 2,
+    ) -> tuple[str, SkillSelection]:
+        selection = await MindBridgeSkillLibrary.select_response_skills(
+            intent,
+            risk,
+            text,
+            ai_client,
+            semantic_enabled=semantic_enabled,
+            max_optional=max_optional,
+        )
+        registry = MindBridgeSkillLibrary.registry()
+        context = "\n\n".join(
+            registry.get_required(name).prompt_context() for name in selection.names
+        )
+        return context, selection
+
+    @staticmethod
     def response_skill_names(intent: IntentType, risk: RiskLevel, text: str) -> list[str]:
-        if intent == IntentType.CHAT:
+        if risk == RiskLevel.HIGH:
+            return list(MindBridgeSkillLibrary._HIGH_RISK_SKILLS)
+
+        if intent == IntentType.CHAT and risk == RiskLevel.LOW:
             return []
 
-        if risk == RiskLevel.HIGH:
-            return ["supportive_response_baseline", "high_risk_safety_plan"]
-
         lowered = text.lower()
-        names = ["supportive_response_baseline", "referral_resource_guidance"]
+        names = list(MindBridgeSkillLibrary._MANDATORY_SUPPORT_SKILLS)
         if _contains_any(lowered, ["焦虑", "惊恐", "恐慌", "panic", "anxious", "崩溃", "呼吸"]):
             names.append("anxiety_grounding_support")
         if _contains_any(lowered, ["失眠", "睡不着", "睡眠", "熬夜", "sleep", "insomnia"]):
@@ -149,6 +248,41 @@ class MindBridgeSkillLibrary:
         if _contains_any(lowered, ["考试", "挂科", "绩点", "论文", "作业", "学业", "学习", "academic", "exam"]):
             names.append("academic_stress_planning")
         return _dedupe(names)
+
+    @staticmethod
+    async def _semantic_optional_skills(text: str, ai_client, *, max_optional: int) -> list[str]:
+        max_optional = max(0, min(max_optional, len(MindBridgeSkillLibrary._OPTIONAL_RESPONSE_SKILLS)))
+        if max_optional == 0:
+            return []
+        registry = MindBridgeSkillLibrary.registry()
+        candidates = [
+            registry.get_required(name)
+            for name in MindBridgeSkillLibrary._OPTIONAL_RESPONSE_SKILLS
+        ]
+        catalog = "\n".join(
+            f"- {skill.name}: {skill.description}" for skill in candidates
+        )
+        raw = await ai_client.complete(
+            [
+                AiMessage(
+                    role="system",
+                    content=(
+                        "你是 MindBridge 的 Skill 选择器。只从候选列表选择最相关的学生支持 Skill，"
+                        "不要选择高风险安全计划，不要解释。严格输出 JSON："
+                        '{"skills":["skill_name"]}。最多选择 '
+                        f"{max_optional} 个。候选列表：\n{catalog}"
+                    ),
+                ),
+                AiMessage(role="user", content=text),
+            ]
+        )
+        data = json.loads(_extract_json_object(raw))
+        values = data.get("skills", [])
+        if not isinstance(values, list):
+            raise ValueError("semantic skill selector returned non-list skills")
+        allowed = set(MindBridgeSkillLibrary._OPTIONAL_RESPONSE_SKILLS)
+        selected = [str(name) for name in values if str(name) in allowed]
+        return _dedupe(selected)[:max_optional]
 
     @staticmethod
     def high_risk_safety_plan_prompt() -> str:
@@ -211,6 +345,14 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _extract_json_object(raw: str) -> str:
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("semantic skill selector did not return JSON")
+    return raw[start : end + 1]
 
 
 def _render_template(template: str, values: dict[str, str]) -> str:

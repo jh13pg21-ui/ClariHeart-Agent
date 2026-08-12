@@ -10,11 +10,18 @@ from sqlalchemy.orm import Session
 
 from app.agents.result import AgentRunResult
 from app.models.entities import AgentRunTrace, ChatSession, UserAccount
+from app.core.config import get_settings
+from app.services.data_protection import SensitiveTextProtector
+from app.services.privacy import PrivacySanitizer
+from app.services.trace_redaction import redact_collaboration_payload
 
 
 class AgentTraceService:
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, settings=None):
         self.db = db
+        self.settings = settings or get_settings()
+        self.protector = SensitiveTextProtector(self.settings)
+        self.privacy = PrivacySanitizer()
 
     def save_run(
         self,
@@ -25,15 +32,22 @@ class AgentTraceService:
         memory_brief: str,
         agent_run: AgentRunResult,
         report_id: int | None,
+        *,
+        commit: bool = True,
     ) -> AgentRunTrace:
+        raw_value = (
+            original_input
+            if getattr(self.settings, "privacy_store_original_input", False)
+            else self.privacy.sanitize(original_input)
+        )
         trace = AgentRunTrace(
             user_id=user.id,
             session_id=session.id,
             report_id=report_id,
             intent=agent_run.intent.value,
             risk_level=agent_run.risk_level.value,
-            original_input=original_input,
-            sanitized_input=sanitized_input,
+            original_input=self.protector.protect(raw_value),
+            sanitized_input=self.protector.protect(sanitized_input),
             memory_brief=memory_brief,
             agent_steps_json=_json(_agent_steps_with_collaboration(agent_run)),
             retrieved_knowledge_json=_json(agent_run.retrieved_knowledge),
@@ -41,13 +55,19 @@ class AgentTraceService:
             assessment_json=_json(agent_run.assessment or {}),
         )
         self.db.add(trace)
-        self.db.commit()
-        self.db.refresh(trace)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(trace)
         return trace
 
 
 def _json(value: Any) -> str:
-    return json.dumps(_to_jsonable(value), ensure_ascii=False, default=str)
+    return json.dumps(
+        redact_collaboration_payload(_to_jsonable(value)),
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 def _agent_steps_with_collaboration(agent_run: AgentRunResult) -> list[Any]:

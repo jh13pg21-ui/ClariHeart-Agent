@@ -1,0 +1,49 @@
+{
+  "version": "routing-gold-v1",
+  "annotation_status": "machine_seed_requires_human_review",
+  "documents": [
+    {
+      "filename": "一图读懂：健康中国行动.pdf",
+      "sha256": "ab6c46f3f9fbaee430a68ac5667b2f006f25d730d2ae7b6bce84e16ed90492f9",
+      "page_count": 12,
+      "page_ranges": [
+        {"start": 1, "end": 12, "text_strategy": "HYBRID", "structure_strategy": "VISION", "page_type": "infographic", "reasons": ["image_text", "infographic_semantics"], "image_text": true, "infographic": true}
+      ]
+    },
+    {
+      "filename": "健全社会心理服务体系和危机干预机制实施方案的通知.pdf",
+      "sha256": "922456d0b6acbd58697c48798c39b96479b64d0683fada7aada518c7ec4a22ed",
+      "page_count": 7,
+      "page_ranges": [
+        {"start": 1, "end": 7, "text_strategy": "NATIVE", "structure_strategy": "LOCAL", "page_type": "policy_text", "reasons": ["native_text_high_quality"]}
+      ]
+    },
+    {
+      "filename": "双列 预防.pdf",
+      "sha256": "811e963660a22d32a5a966a3cd251151faf742ec3a998d0680962bc6e2c129b2",
+      "page_count": 19,
+      "page_ranges": [
+        {"start": 1, "end": 18, "text_strategy": "NATIVE", "structure_strategy": "VISION", "page_type": "double_column", "reasons": ["multi_column_reading_order"], "multi_column": true},
+        {"start": 19, "end": 19, "text_strategy": "PADDLE_OCR", "structure_strategy": "LOCAL", "page_type": "sparse_or_blank", "reasons": ["native_text_sparse"], "searchable": false}
+      ]
+    },
+    {
+      "filename": "含表格、图片中有字 心理健康知识手册.pdf",
+      "sha256": "1d013c18363a1f9a710ab8dcd7d66e7f3130d020f4801d5a5bf53dca5cdb823b",
+      "page_count": 99,
+      "page_ranges": [
+        {"start": 1, "end": 1, "text_strategy": "HYBRID", "structure_strategy": "VISION", "page_type": "handbook_cover", "reasons": ["cover_image_text"], "image_text": true},
+        {"start": 2, "end": 99, "text_strategy": "PADDLE_OCR", "structure_strategy": "LOCAL", "page_type": "handbook", "reasons": ["font_mapping_or_native_text_risk"]}
+      ]
+    },
+    {
+      "filename": "大部分漫画 漫画中文字可提取 压力缓解.pdf",
+      "sha256": "6f33dedd82c48369bd2567b4821ae77414062e29774ef976cd67e9661e91dc68",
+      "page_count": 133,
+      "page_ranges": [
+        {"start": 1, "end": 132, "text_strategy": "HYBRID", "structure_strategy": "VISION", "page_type": "comic", "reasons": ["comic_panel_order", "image_text"], "image_text": true, "comic": true},
+        {"start": 133, "end": 133, "text_strategy": "NATIVE", "structure_strategy": "VISION", "page_type": "comic_back_cover", "reasons": ["visual_semantics"], "comic": true}
+      ]
+    }
+  ]
+}

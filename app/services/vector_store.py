@@ -63,21 +63,29 @@ class ChromaKnowledgeStore:
         self.can_embed = settings.knowledge_vector_enabled
 
     def upsert_chunks(self, chunks: list[KnowledgeChunk], embeddings: list[list[float]]) -> int:
-        rows = [chunk for chunk in chunks if chunk.id is not None and chunk.content.strip()]
+        pairs = [
+            (chunk, embedding)
+            for chunk, embedding in zip(chunks, embeddings)
+            if chunk.id is not None and chunk.content.strip()
+        ]
+        rows = [chunk for chunk, _ in pairs]
         if not rows:
             return 0
-        ids = [self._id(chunk.id) for chunk in rows]
+        ids = [self._id(chunk) for chunk in rows]
         documents = [chunk.content for chunk in rows]
-        metadatas = [
-            {"db_id": int(chunk.id), "source": chunk.source, "source_index": int(chunk.source_index)}
-            for chunk in rows
-        ]
-        self.collection.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
+        metadatas = [self._metadata(chunk) for chunk in rows]
+        selected_embeddings = [embedding for _, embedding in pairs]
+        self.collection.upsert(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+            embeddings=selected_embeddings,
+        )
         self.snapshot()
         return len(rows)
 
     def sync_chunks(self, chunks: list[KnowledgeChunk], embeddings: list[list[float]]) -> int:
-        valid_ids = {self._id(int(chunk.id)) for chunk in chunks if chunk.id is not None}
+        valid_ids = {self._id(chunk) for chunk in chunks if chunk.id is not None}
         current_ids = set(self.collection.get().get("ids", []))
         stale_ids = sorted(current_ids - valid_ids)
         if stale_ids:
@@ -85,7 +93,7 @@ class ChromaKnowledgeStore:
         return self.upsert_chunks(chunks, embeddings)
 
     def has_exact_chunk_ids(self, chunks: list[KnowledgeChunk]) -> bool:
-        valid_ids = {self._id(int(chunk.id)) for chunk in chunks if chunk.id is not None}
+        valid_ids = {self._id(chunk) for chunk in chunks if chunk.id is not None}
         current_ids = set(self.collection.get().get("ids", []))
         return current_ids == valid_ids
 
@@ -169,8 +177,26 @@ class ChromaKnowledgeStore:
         for stale in snapshots[keep:]:
             shutil.rmtree(stale, ignore_errors=True)
 
-    def _id(self, chunk_id: int) -> str:
-        return f"knowledge-chunk-{chunk_id}"
+    def _id(self, chunk: KnowledgeChunk) -> str:
+        return chunk.stable_id or f"knowledge-chunk-{chunk.id}"
+
+    def _metadata(self, chunk: KnowledgeChunk) -> dict[str, str | int | bool]:
+        metadata: dict[str, str | int | bool] = {
+            "db_id": int(chunk.id),
+            "source": chunk.source,
+            "source_index": int(chunk.source_index),
+            "chunk_kind": chunk.chunk_kind,
+            "active": bool(chunk.active),
+        }
+        optional = {
+            "stable_id": chunk.stable_id,
+            "document_id": chunk.document_id,
+            "document_version_id": chunk.document_version_id,
+            "page_start": chunk.page_start,
+            "page_end": chunk.page_end,
+        }
+        metadata.update({key: value for key, value in optional.items() if value is not None})
+        return metadata
 
 
 ChromaKnowledgeVectorStore = ChromaKnowledgeStore

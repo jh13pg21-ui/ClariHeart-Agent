@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.models.entities import AlertRecord, AgentRunTrace, CaseNote, ChatMessage, ChatSession, DeadLetterRecord, ExcelRecord, PsychologicalReport, RiskCase, ToolAuditRecord, ToolJob, UserAccount
-from app.schemas.dtos import AgentRunTraceResponse, CaseNoteResponse, ConversationMessageResponse, ConversationResponse, DeadLetterResponse, ReportResponse, RiskCaseResponse, ToolAuditResponse, ToolJobResponse, ToolRecordResponse
+from app.models.entities import AlertRecord, AgentRunTrace, CaseNote, ChatMessage, ChatSession, DeadLetterRecord, ExcelRecord, OutboxEvent, PsychologicalReport, RiskCase, ToolAuditRecord, ToolJob, UserAccount
+from app.schemas.dtos import AgentRunTraceResponse, CaseNoteResponse, ConversationMessageResponse, ConversationResponse, DeadLetterResponse, OutboxEventResponse, ReportResponse, RiskCaseResponse, ToolAuditResponse, ToolJobResponse, ToolRecordResponse
+from app.core.config import get_settings
+from app.services.data_protection import SensitiveTextProtector
 
 
 class ReportService:
     def __init__(self, db: Session):
         self.db = db
+        self.protector = SensitiveTextProtector(get_settings())
 
     def latest_reports(self, user_id: int | None = None) -> list[ReportResponse]:
         query = self.db.query(PsychologicalReport).order_by(PsychologicalReport.created_at.desc())
@@ -98,51 +101,67 @@ class ReportService:
             for row in rows
         ]
 
-
-def agent_run_traces(self) -> list[AgentRunTraceResponse]:
-    rows = self.db.query(AgentRunTrace).order_by(AgentRunTrace.created_at.desc()).limit(100).all()
-    responses = []
-    for row in rows:
-        user = self.db.get(UserAccount, row.user_id)
-        session = self.db.get(ChatSession, row.session_id)
-        responses.append(
-            AgentRunTraceResponse(
-                id=row.id,
-                sessionId=session.public_id if session else "",
-                reportId=row.report_id,
-                username=user.username if user else "",
-                intent=row.intent,
-                riskLevel=row.risk_level,
-                originalInput=row.original_input,
-                sanitizedInput=row.sanitized_input,
-                memoryBrief=row.memory_brief,
-                agentSteps=_loads(row.agent_steps_json, []),
-                retrievedKnowledge=_loads(row.retrieved_knowledge_json, []),
-                responseMessages=_loads(row.response_messages_json, []),
-                assessment=_loads(row.assessment_json, {}),
+    def outbox_events(self) -> list[OutboxEventResponse]:
+        rows = self.db.query(OutboxEvent).order_by(OutboxEvent.created_at.desc()).limit(100).all()
+        return [
+            OutboxEventResponse(
+                eventId=row.event_id,
+                eventType=row.event_type,
+                aggregateType=row.aggregate_type,
+                aggregateId=row.aggregate_id,
+                status=row.status,
+                attempts=row.attempts,
+                lastError=row.last_error,
+                availableAt=row.available_at,
                 createdAt=row.created_at,
             )
-        )
-    return responses
+            for row in rows
+        ]
 
-def tool_audits(self) -> list[ToolAuditResponse]:
-    rows = self.db.query(ToolAuditRecord).order_by(ToolAuditRecord.created_at.desc()).limit(100).all()
-    return [
-        ToolAuditResponse(
-            id=row.id,
-            jobId=row.job_id,
-            reportId=row.report_id,
-            toolName=row.tool_name,
-            policy=row.policy,
-            allowed=row.allowed,
-            status=row.status,
-            reason=row.reason,
-            payload=_loads(row.payload, {}),
-            createdAt=row.created_at,
-            updatedAt=row.updated_at,
-        )
-        for row in rows
-    ]
+    def agent_run_traces(self) -> list[AgentRunTraceResponse]:
+        rows = self.db.query(AgentRunTrace).order_by(AgentRunTrace.created_at.desc()).limit(100).all()
+        responses = []
+        for row in rows:
+            user = self.db.get(UserAccount, row.user_id)
+            session = self.db.get(ChatSession, row.session_id)
+            responses.append(
+                AgentRunTraceResponse(
+                    id=row.id,
+                    sessionId=session.public_id if session else "",
+                    reportId=row.report_id,
+                    username=user.username if user else "",
+                    intent=row.intent,
+                    riskLevel=row.risk_level,
+                    originalInput=self.protector.reveal(row.original_input),
+                    sanitizedInput=self.protector.reveal(row.sanitized_input),
+                    memoryBrief=row.memory_brief,
+                    agentSteps=_loads(row.agent_steps_json, []),
+                    retrievedKnowledge=_loads(row.retrieved_knowledge_json, []),
+                    responseMessages=_loads(row.response_messages_json, []),
+                    assessment=_loads(row.assessment_json, {}),
+                    createdAt=row.created_at,
+                )
+            )
+        return responses
+
+    def tool_audits(self) -> list[ToolAuditResponse]:
+        rows = self.db.query(ToolAuditRecord).order_by(ToolAuditRecord.created_at.desc()).limit(100).all()
+        return [
+            ToolAuditResponse(
+                id=row.id,
+                jobId=row.job_id,
+                reportId=row.report_id,
+                toolName=row.tool_name,
+                policy=row.policy,
+                allowed=row.allowed,
+                status=row.status,
+                reason=row.reason,
+                payload=_loads(row.payload, {}),
+                createdAt=row.created_at,
+                updatedAt=row.updated_at,
+            )
+            for row in rows
+        ]
 
     def conversation(self, public_id: str) -> ConversationResponse:
         session = self.db.query(ChatSession).filter(ChatSession.public_id == public_id).first()
@@ -152,7 +171,7 @@ def tool_audits(self) -> list[ToolAuditResponse]:
         return ConversationResponse(
             sessionId=session.public_id,
             title=session.title,
-            messages=[ConversationMessageResponse(role=row.role, content=row.content, createdAt=row.created_at) for row in rows],
+            messages=[ConversationMessageResponse(role=row.role, content=self.protector.reveal(row.content), createdAt=row.created_at) for row in rows],
         )
 
     def _report_response(self, report: PsychologicalReport) -> ReportResponse:
@@ -163,7 +182,7 @@ def tool_audits(self) -> list[ToolAuditResponse]:
             sessionId=session.public_id if session else "",
             username=user.username if user else "",
             displayName=user.display_name if user else "",
-            content=report.content,
+            content=self.protector.reveal(report.content),
             intent=report.intent,
             emotion=report.emotion,
             emotionScore=report.emotion_score,

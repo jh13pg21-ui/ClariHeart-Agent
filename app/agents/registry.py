@@ -19,6 +19,7 @@ class AgentCapability(str, Enum):
 class AgentProfile:
     name: str
     capabilities: frozenset[AgentCapability] = field(default_factory=frozenset)
+    prompt_id: str = ""
     system_prompt: str = ""
     memory_policy: str = "none"
     model_profile: str = "default"
@@ -38,7 +39,7 @@ class AutonomousAgent(Protocol):
     def decide(self, task: AgentTask, board: CollaborationBlackboard) -> AgentDecision:
         ...
 
-    def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
+    async def act(self, task: AgentTask, board: CollaborationBlackboard) -> AgentTurnResult:
         ...
 
 

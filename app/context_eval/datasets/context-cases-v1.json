@@ -1,0 +1,20 @@
+{
+  "version": "context-recovery-v1",
+  "thresholds": {
+    "minimumTokenReductionRatio": 0.2,
+    "maximumTransientRetries": 2,
+    "maximumReactiveCompactions": 1,
+    "maximumCloudCallsForHighRisk": 0
+  },
+  "cases": [
+    {"id": "baseline-low", "fault": "none", "riskLevel": "LOW", "expectedOutcome": "success"},
+    {"id": "context-overflow", "fault": "prompt_too_long", "riskLevel": "LOW", "expectedOutcome": "recovered"},
+    {"id": "rate-limit", "fault": "429", "riskLevel": "LOW", "expectedOutcome": "cloud_fallback"},
+    {"id": "provider-overload", "fault": "529", "riskLevel": "LOW", "expectedOutcome": "cloud_fallback"},
+    {"id": "provider-timeout", "fault": "timeout", "riskLevel": "LOW", "expectedOutcome": "cloud_fallback"},
+    {"id": "structured-output-invalid", "fault": "invalid_json", "riskLevel": "LOW", "expectedOutcome": "deterministic_fallback"},
+    {"id": "stream-disconnected", "fault": "stream_interrupted", "riskLevel": "LOW", "expectedOutcome": "recovered"},
+    {"id": "memory-cache-down", "fault": "redis_unavailable", "riskLevel": "LOW", "expectedOutcome": "degraded"},
+    {"id": "high-risk-overload", "fault": "529", "riskLevel": "HIGH", "expectedOutcome": "contained"}
+  ]
+}

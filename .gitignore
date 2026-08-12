@@ -1,4 +1,5 @@
 .venv/
+.pytest-tmp/
 __pycache__/
 *.pyc
 .env
@@ -8,10 +9,14 @@ data/*.sqlite
 data/*.xlsx
 data/chroma/
 data/chroma-snapshots/
+data/knowledge-artifacts/
 target/
 dist/
 *.gguf
 *.gguf.zip
+models/mindbridge-qwen2.5-7b-lora/
 *.zip
 /python
+.worktrees/
 .DS_Store
+app/knowledge/pdf/*.pdf

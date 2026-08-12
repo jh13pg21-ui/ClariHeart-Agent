@@ -31,29 +31,87 @@ services:
       timeout: 3s
       retries: 30
 
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: mindbridge
+      RABBITMQ_DEFAULT_PASS: mindbridge
+    ports:
+      - "15672:15672"
+      - "15673:5672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  migrate:
+    build:
+      context: .
+      target: production
+    command: python -m app.cli.migrate upgrade
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-migrate-secret-key-at-least-32-bytes}
+    restart: "no"
+
   app:
-    build: .
+    build:
+      context: .
+      target: production
     depends_on:
       mysql:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-production}
+      AUTH_SECURE_COOKIE: ${AUTH_SECURE_COOKIE:-false}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
       AGENT_FRAMEWORK: ${AGENT_FRAMEWORK:-event_driven_multi_agent}
       AI_PROVIDER: ${AI_PROVIDER:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-mindbridge-qwen2.5-7b-ft:latest}
       OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text:latest}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
       DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
       REDIS_URL: redis://redis:6379/0
+      REDIS_MEMORY_TTL_SECONDS: ${REDIS_MEMORY_TTL_SECONDS:-86400}
+      REDIS_MEMORY_MAX_MESSAGES: ${REDIS_MEMORY_MAX_MESSAGES:-40}
+      MEMORY_COMPACTION_ENABLED: ${MEMORY_COMPACTION_ENABLED:-true}
+      MEMORY_COMPACTION_RECENT_MESSAGES: ${MEMORY_COMPACTION_RECENT_MESSAGES:-8}
+      MEMORY_SUMMARY_REFRESH_MESSAGES: ${MEMORY_SUMMARY_REFRESH_MESSAGES:-4}
+      MEMORY_SUMMARY_MAX_CHARS: ${MEMORY_SUMMARY_MAX_CHARS:-500}
+      MEMORY_SUMMARY_LLM_ENABLED: ${MEMORY_SUMMARY_LLM_ENABLED:-true}
+      MEMORY_SUMMARY_LLM_ATTEMPTS: ${MEMORY_SUMMARY_LLM_ATTEMPTS:-2}
+      MEMORY_SUMMARY_MAX_SOURCE_MESSAGES: ${MEMORY_SUMMARY_MAX_SOURCE_MESSAGES:-40}
+      MEMORY_SUMMARY_INPUT_MAX_CHARS: ${MEMORY_SUMMARY_INPUT_MAX_CHARS:-12000}
+      RABBITMQ_URL: amqp://mindbridge:mindbridge@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-app-secret-key-at-least-32-bytes}
       KNOWLEDGE_VECTOR_ENABLED: ${KNOWLEDGE_VECTOR_ENABLED:-true}
       KNOWLEDGE_VECTOR_REQUIRED: ${KNOWLEDGE_VECTOR_REQUIRED:-false}
       CHROMA_PERSIST_DIR: /app/data/chroma
       CHROMA_SNAPSHOT_DIR: /app/data/chroma-snapshots
       CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-mindbridge_knowledge}
-      TOOL_QUEUE_ENABLED: ${TOOL_QUEUE_ENABLED:-true}
-      TOOL_QUEUE_EXCEL_WORKERS: ${TOOL_QUEUE_EXCEL_WORKERS:-1}
-      TOOL_QUEUE_EMAIL_WORKERS: ${TOOL_QUEUE_EMAIL_WORKERS:-2}
+      RAG_INGESTION_ENABLED: ${RAG_INGESTION_ENABLED:-true}
+      RAG_INGESTION_QUEUE: ${RAG_INGESTION_QUEUE:-mindbridge.ingestion}
+      RAG_INGESTION_MAX_FILE_SIZE_BYTES: ${RAG_INGESTION_MAX_FILE_SIZE_BYTES:-52428800}
+      RAG_INGESTION_MAX_PAGES: ${RAG_INGESTION_MAX_PAGES:-500}
+      RAG_ARTIFACT_DIR: /app/data/knowledge-artifacts
+      PRIVACY_STORE_ORIGINAL_INPUT: ${PRIVACY_STORE_ORIGINAL_INPUT:-false}
+      PRIVACY_REQUIRE_ENCRYPTION_AT_REST: ${PRIVACY_REQUIRE_ENCRYPTION_AT_REST:-false}
+      SENSITIVE_DATA_ENCRYPTION_KEY: ${SENSITIVE_DATA_ENCRYPTION_KEY:-}
       ALERT_EMAIL_DELIVERY_MODE: ${ALERT_EMAIL_DELIVERY_MODE:-log}
       ALERT_EMAIL_RATE_LIMIT_PER_MINUTE: ${ALERT_EMAIL_RATE_LIMIT_PER_MINUTE:-30}
       EXCEL_PATH: /app/data/mindbridge-risk-ledger.xlsx
@@ -63,6 +121,203 @@ services:
       - ./data:/app/data
       - ./models/mindbridge-qwen2.5-7b-ft:/app/models/mindbridge-qwen2.5-7b-ft:ro
 
+  worker-general:
+    build:
+      context: .
+      target: production
+    command: celery -A app.workers.celery_app:celery_app worker --loglevel=INFO --queues=mindbridge.general --concurrency=${CELERY_GENERAL_CONCURRENCY:-2}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      AI_PROVIDER: ${AI_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-mindbridge-qwen2.5-7b-ft:latest}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://mindbridge:mindbridge@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      LONG_TERM_MEMORY_ENABLED: ${LONG_TERM_MEMORY_ENABLED:-true}
+      LONG_TERM_MEMORY_MAX_ITEMS: ${LONG_TERM_MEMORY_MAX_ITEMS:-200}
+      LONG_TERM_MEMORY_RELEVANT_ITEMS: ${LONG_TERM_MEMORY_RELEVANT_ITEMS:-5}
+      LONG_TERM_MEMORY_EXTRACT_MESSAGES: ${LONG_TERM_MEMORY_EXTRACT_MESSAGES:-10}
+      LONG_TERM_MEMORY_EXTRACT_MIN_NEW_MESSAGES: ${LONG_TERM_MEMORY_EXTRACT_MIN_NEW_MESSAGES:-6}
+      MEMORY_CONSOLIDATION_ENABLED: ${MEMORY_CONSOLIDATION_ENABLED:-true}
+      MEMORY_CONSOLIDATION_MIN_INTERVAL_HOURS: ${MEMORY_CONSOLIDATION_MIN_INTERVAL_HOURS:-24}
+      MEMORY_CONSOLIDATION_SCAN_INTERVAL_MINUTES: ${MEMORY_CONSOLIDATION_SCAN_INTERVAL_MINUTES:-60}
+      MEMORY_CONSOLIDATION_MIN_ACTIVE_MEMORIES: ${MEMORY_CONSOLIDATION_MIN_ACTIVE_MEMORIES:-10}
+      MEMORY_CONSOLIDATION_MIN_MODIFIED_SESSIONS: ${MEMORY_CONSOLIDATION_MIN_MODIFIED_SESSIONS:-5}
+      MEMORY_CONSOLIDATION_LEASE_SECONDS: ${MEMORY_CONSOLIDATION_LEASE_SECONDS:-3600}
+      MEMORY_CONSOLIDATION_SCAN_BATCH_SIZE: ${MEMORY_CONSOLIDATION_SCAN_BATCH_SIZE:-100}
+      REDIS_MEMORY_TTL_SECONDS: ${REDIS_MEMORY_TTL_SECONDS:-86400}
+      REDIS_MEMORY_MAX_MESSAGES: ${REDIS_MEMORY_MAX_MESSAGES:-40}
+      MEMORY_COMPACTION_ENABLED: ${MEMORY_COMPACTION_ENABLED:-true}
+      MEMORY_COMPACTION_RECENT_MESSAGES: ${MEMORY_COMPACTION_RECENT_MESSAGES:-8}
+      MEMORY_SUMMARY_REFRESH_MESSAGES: ${MEMORY_SUMMARY_REFRESH_MESSAGES:-4}
+      MEMORY_SUMMARY_MAX_CHARS: ${MEMORY_SUMMARY_MAX_CHARS:-500}
+      MEMORY_SUMMARY_LLM_ENABLED: ${MEMORY_SUMMARY_LLM_ENABLED:-true}
+      MEMORY_SUMMARY_LLM_ATTEMPTS: ${MEMORY_SUMMARY_LLM_ATTEMPTS:-2}
+      MEMORY_SUMMARY_MAX_SOURCE_MESSAGES: ${MEMORY_SUMMARY_MAX_SOURCE_MESSAGES:-40}
+      MEMORY_SUMMARY_INPUT_MAX_CHARS: ${MEMORY_SUMMARY_INPUT_MAX_CHARS:-12000}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      PRIVACY_STORE_ORIGINAL_INPUT: ${PRIVACY_STORE_ORIGINAL_INPUT:-false}
+      PRIVACY_REQUIRE_ENCRYPTION_AT_REST: ${PRIVACY_REQUIRE_ENCRYPTION_AT_REST:-false}
+      SENSITIVE_DATA_ENCRYPTION_KEY: ${SENSITIVE_DATA_ENCRYPTION_KEY:-}
+      EXCEL_PATH: /app/data/mindbridge-risk-ledger.xlsx
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  worker-alert:
+    build:
+      context: .
+      target: production
+    command: celery -A app.workers.celery_app:celery_app worker --loglevel=INFO --queues=mindbridge.alert --concurrency=${CELERY_ALERT_CONCURRENCY:-1}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://mindbridge:mindbridge@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      ALERT_EMAIL_DELIVERY_MODE: ${ALERT_EMAIL_DELIVERY_MODE:-log}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-10}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      ALERT_EMAIL_SUBJECT_PREFIX: ${ALERT_EMAIL_SUBJECT_PREFIX:-[MindBridge 高风险预警]}
+      ALERT_EMAIL_RATE_LIMIT_PER_MINUTE: ${ALERT_EMAIL_RATE_LIMIT_PER_MINUTE:-30}
+      SENSITIVE_DATA_ENCRYPTION_KEY: ${SENSITIVE_DATA_ENCRYPTION_KEY:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
+    restart: unless-stopped
+
+  worker-ingestion:
+    build:
+      context: .
+      dockerfile: Dockerfile.ingestion
+    command: celery -A app.workers.celery_app:celery_app worker --loglevel=INFO --queues=mindbridge.ingestion --concurrency=1
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://mindbridge:mindbridge@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      KNOWLEDGE_VECTOR_ENABLED: ${KNOWLEDGE_VECTOR_ENABLED:-true}
+      KNOWLEDGE_VECTOR_REQUIRED: ${KNOWLEDGE_VECTOR_REQUIRED:-false}
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      CHROMA_SNAPSHOT_DIR: /app/data/chroma-snapshots
+      CHROMA_COLLECTION_NAME: ${CHROMA_COLLECTION_NAME:-mindbridge_knowledge}
+      RAG_INGESTION_ENABLED: ${RAG_INGESTION_ENABLED:-true}
+      RAG_INGESTION_QUEUE: ${RAG_INGESTION_QUEUE:-mindbridge.ingestion}
+      RAG_INGESTION_MAX_ATTEMPTS: ${RAG_INGESTION_MAX_ATTEMPTS:-3}
+      RAG_INGESTION_MAX_PAGES: ${RAG_INGESTION_MAX_PAGES:-500}
+      RAG_PIPELINE_FINGERPRINT: ${RAG_PIPELINE_FINGERPRINT:-rag-v3}
+      RAG_ARTIFACT_DIR: /app/data/knowledge-artifacts
+      RAG_PAGE_RENDER_DPI: ${RAG_PAGE_RENDER_DPI:-150}
+      RAG_OCR_ENABLED: ${RAG_OCR_ENABLED:-true}
+      RAG_OCR_PROVIDER: ${RAG_OCR_PROVIDER:-paddleocr}
+      RAG_OCR_DEVICE: ${RAG_OCR_DEVICE:-cpu}
+      RAG_VISION_ENABLED: ${RAG_VISION_ENABLED:-true}
+      RAG_VISION_PROVIDER: ${RAG_VISION_PROVIDER:-openai_compatible}
+      RAG_VISION_MODEL: ${RAG_VISION_MODEL:-gpt-5.6-luna}
+      RAG_VISION_DETAIL: ${RAG_VISION_DETAIL:-original}
+      RAG_VISION_BASE_URL: ${RAG_VISION_BASE_URL:-}
+      RAG_VISION_API_KEY: ${RAG_VISION_API_KEY:-}
+      RAG_VISION_TIMEOUT_SECONDS: ${RAG_VISION_TIMEOUT_SECONDS:-90}
+      RAG_VISION_MAX_ATTEMPTS: ${RAG_VISION_MAX_ATTEMPTS:-2}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
+    volumes:
+      - ./data:/app/data
+      - ./app/knowledge:/app/app/knowledge:ro
+      - paddle-models:/root/.paddlex
+    restart: unless-stopped
+
+  worker-beat:
+    build:
+      context: .
+      target: production
+    command: celery -A app.workers.celery_app:celery_app beat --loglevel=INFO
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://mindbridge:mindbridge@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      MEMORY_CONSOLIDATION_BEAT_INTERVAL_MINUTES: ${MEMORY_CONSOLIDATION_BEAT_INTERVAL_MINUTES:-15}
+      CHAT_DATA_RETENTION_DAYS: ${CHAT_DATA_RETENTION_DAYS:-365}
+      RISK_DATA_RETENTION_DAYS: ${RISK_DATA_RETENTION_DAYS:-1095}
+      SENSITIVE_DATA_ENCRYPTION_KEY: ${SENSITIVE_DATA_ENCRYPTION_KEY:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
+    restart: unless-stopped
+
+  outbox-publisher:
+    build:
+      context: .
+      target: production
+    command: python -m app.workers.outbox_publisher
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: mysql+pymysql://mindbridge:mindbridge@mysql:3306/mindbridge?charset=utf8mb4
+      RABBITMQ_URL: amqp://mindbridge:mindbridge@rabbitmq:5672//
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      OUTBOX_PUBLISHER_BATCH_SIZE: ${OUTBOX_PUBLISHER_BATCH_SIZE:-50}
+      OUTBOX_PUBLISHER_POLL_SECONDS: ${OUTBOX_PUBLISHER_POLL_SECONDS:-1}
+      OUTBOX_PUBLISHER_MAX_ATTEMPTS: ${OUTBOX_PUBLISHER_MAX_ATTEMPTS:-10}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-worker-secret-key-at-least-32-bytes}
+    restart: unless-stopped
+
 volumes:
   mysql-data:
   redis-data:
+  rabbitmq-data:
+  paddle-models:

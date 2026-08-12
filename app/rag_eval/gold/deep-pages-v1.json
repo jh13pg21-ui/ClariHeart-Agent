@@ -1,0 +1,40 @@
+{
+  "version": "deep-pages-v1",
+  "annotation_status": "machine_seed_requires_human_review",
+  "pages": [
+    {"filename":"一图读懂：健康中国行动.pdf","page_number":1,"page_type":"infographic","key_text":["健康中国行动","儿童青少年心理健康"],"expected_section_path":["健康中国行动"],"relations":["figure_contains_text"],"question":"该行动面向哪个重点群体？","evidence_pages":[1]},
+    {"filename":"一图读懂：健康中国行动.pdf","page_number":2,"page_type":"infographic","key_text":["健康中国行动"],"expected_section_path":["行动目标"],"relations":["infographic_reading_order"],"question":"本页说明了哪些行动目标？","evidence_pages":[2]},
+    {"filename":"一图读懂：健康中国行动.pdf","page_number":4,"page_type":"infographic","key_text":["健康中国行动"],"expected_section_path":["重点任务"],"relations":["figure_contains_text"],"question":"本页列出了哪些重点任务？","evidence_pages":[4]},
+    {"filename":"一图读懂：健康中国行动.pdf","page_number":6,"page_type":"infographic","key_text":["健康中国行动"],"expected_section_path":["重点任务"],"relations":["infographic_reading_order"],"question":"本页的行动措施是什么？","evidence_pages":[6]},
+    {"filename":"一图读懂：健康中国行动.pdf","page_number":9,"page_type":"infographic","key_text":["健康中国行动"],"expected_section_path":["保障措施"],"relations":["figure_contains_text"],"question":"本页呈现了什么保障措施？","evidence_pages":[9]},
+    {"filename":"一图读懂：健康中国行动.pdf","page_number":12,"page_type":"infographic","key_text":["健康中国行动","儿童青少年"],"expected_section_path":["相关链接"],"relations":["caption_links_figure"],"question":"页面链接到哪项儿童青少年行动？","evidence_pages":[12]},
+
+    {"filename":"健全社会心理服务体系和危机干预机制实施方案的通知.pdf","page_number":1,"page_type":"policy_text","key_text":["健全社会心理服务体系","危机干预机制"],"expected_section_path":["通知"],"relations":[],"question":"该通知印发了什么方案？","evidence_pages":[1]},
+    {"filename":"健全社会心理服务体系和危机干预机制实施方案的通知.pdf","page_number":2,"page_type":"policy_text","key_text":["总体要求","社会心理服务体系"],"expected_section_path":["总体要求"],"relations":[],"question":"方案的总体要求是什么？","evidence_pages":[2]},
+    {"filename":"健全社会心理服务体系和危机干预机制实施方案的通知.pdf","page_number":3,"page_type":"policy_text","key_text":["教育系统心理服务","心理健康教育"],"expected_section_path":["重点任务"],"relations":[],"question":"教育系统应如何强化心理服务？","evidence_pages":[3]},
+    {"filename":"健全社会心理服务体系和危机干预机制实施方案的通知.pdf","page_number":4,"page_type":"policy_text","key_text":["社会化心理服务","严禁开展心理治疗"],"expected_section_path":["重点任务"],"relations":[],"question":"社会心理服务机构有哪些服务边界？","evidence_pages":[4]},
+    {"filename":"健全社会心理服务体系和危机干预机制实施方案的通知.pdf","page_number":6,"page_type":"policy_text","key_text":["12356心理援助热线","服务网络"],"expected_section_path":["拓展服务形式与内容"],"relations":[],"question":"12356 热线应如何建设？","evidence_pages":[6]},
+    {"filename":"健全社会心理服务体系和危机干预机制实施方案的通知.pdf","page_number":7,"page_type":"policy_text","key_text":["心理危机风险","早发现"],"expected_section_path":["危机干预"],"relations":[],"question":"心理危机风险应如何处置？","evidence_pages":[7]},
+
+    {"filename":"双列 预防.pdf","page_number":1,"page_type":"double_column","key_text":["精神及行为异常","世界卫生组织"],"expected_section_path":["封面"],"relations":["double_column_order"],"question":"该资料由哪个组织发布？","evidence_pages":[1]},
+    {"filename":"双列 预防.pdf","page_number":4,"page_type":"double_column","key_text":["youth suicidal behaviour","suicide prevention"],"expected_section_path":["参考文献"],"relations":["double_column_order"],"question":"本页参考文献涉及什么预防主题？","evidence_pages":[4]},
+    {"filename":"双列 预防.pdf","page_number":7,"page_type":"double_column","key_text":["Israel Orbach","David Schaffer"],"expected_section_path":["致谢"],"relations":["double_column_order"],"question":"本页列出了哪些专家？","evidence_pages":[7]},
+    {"filename":"双列 预防.pdf","page_number":10,"page_type":"double_column","key_text":["沟通过程","自杀危险"],"expected_section_path":["沟通"],"relations":["double_column_order"],"question":"与有风险的儿童沟通时首先应明确什么？","evidence_pages":[10]},
+    {"filename":"双列 预防.pdf","page_number":15,"page_type":"double_column","key_text":["精神疾病","抑郁"],"expected_section_path":["危险因素"],"relations":["double_column_order"],"question":"本页提到哪些精神疾病风险因素？","evidence_pages":[15]},
+    {"filename":"双列 预防.pdf","page_number":19,"page_type":"double_column","key_text":["WHO/MNH/MBD/00.3"],"expected_section_path":["末页"],"relations":["sparse_page"],"question":"末页保留了什么文档编号？","evidence_pages":[19]},
+
+    {"filename":"含表格、图片中有字 心理健康知识手册.pdf","page_number":1,"page_type":"handbook","key_text":["大学生心理健康知识手册","深圳大学"],"expected_section_path":["封面"],"relations":["figure_contains_text"],"question":"该手册由哪个单位编制？","evidence_pages":[1]},
+    {"filename":"含表格、图片中有字 心理健康知识手册.pdf","page_number":20,"page_type":"handbook","key_text":["心理健康","世界卫生组织"],"expected_section_path":["心理健康"],"relations":[],"question":"世界卫生组织如何理解健康？","evidence_pages":[20]},
+    {"filename":"含表格、图片中有字 心理健康知识手册.pdf","page_number":40,"page_type":"handbook","key_text":["强迫现象","强迫症"],"expected_section_path":["心理困扰"],"relations":[],"question":"强迫现象是否等于强迫症？","evidence_pages":[40]},
+    {"filename":"含表格、图片中有字 心理健康知识手册.pdf","page_number":60,"page_type":"handbook","key_text":["理工科","文科"],"expected_section_path":["学习"],"relations":["comparison"],"question":"理工科和文科的学习特点有何不同？","evidence_pages":[60]},
+    {"filename":"含表格、图片中有字 心理健康知识手册.pdf","page_number":80,"page_type":"handbook","key_text":["人际交往","自立"],"expected_section_path":["人际交往"],"relations":[],"question":"大学生人际交往有哪些特点？","evidence_pages":[80]},
+    {"filename":"含表格、图片中有字 心理健康知识手册.pdf","page_number":99,"page_type":"handbook","key_text":["无伤害","推荐资源"],"expected_section_path":["推荐资源"],"relations":["list_order"],"question":"处理性问题的底线是什么？","evidence_pages":[99]},
+
+    {"filename":"大部分漫画 漫画中文字可提取 压力缓解.pdf","page_number":1,"page_type":"comic","key_text":["压力之下","图解指南"],"expected_section_path":["封面"],"relations":["comic_panel_order"],"question":"这是什么主题的图解指南？","evidence_pages":[1]},
+    {"filename":"大部分漫画 漫画中文字可提取 压力缓解.pdf","page_number":25,"page_type":"comic","key_text":["压力性情境","价值观"],"expected_section_path":["着陆"],"relations":["comic_panel_order"],"question":"压力性情境如何影响价值观？","evidence_pages":[25]},
+    {"filename":"大部分漫画 漫画中文字可提取 压力缓解.pdf","page_number":50,"page_type":"comic","key_text":["注意你的呼吸","数到三"],"expected_section_path":["着陆","呼吸练习"],"relations":["comic_panel_order"],"question":"缓慢呼吸练习要求如何数数？","evidence_pages":[50]},
+    {"filename":"大部分漫画 漫画中文字可提取 压力缓解.pdf","page_number":75,"page_type":"comic","key_text":["命名它","想法或感受"],"expected_section_path":["解套"],"relations":["comic_panel_order"],"question":"注意到想法或感受后可以怎么做？","evidence_pages":[75]},
+    {"filename":"大部分漫画 漫画中文字可提取 压力缓解.pdf","page_number":100,"page_type":"comic","key_text":["接受无法改变的痛苦","价值观"],"expected_section_path":["践行个人价值观"],"relations":["comic_panel_order"],"question":"面对困境时应如何对待无法改变的痛苦？","evidence_pages":[100]},
+    {"filename":"大部分漫画 漫画中文字可提取 压力缓解.pdf","page_number":133,"page_type":"comic","key_text":["压力之下","实用技能"],"expected_section_path":["结语"],"relations":["figure_contains_text"],"question":"指南提供了哪类帮助？","evidence_pages":[133]}
+  ]
+}
