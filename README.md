@@ -1,6 +1,6 @@
-# MindBridge
+# ClariHeart Agent
 
-MindBridge 是一个面向校园心理支持场景的生产化 AI Agent 项目。系统采用 FastAPI、事件驱动多 Agent、分层记忆、混合检索 RAG、事务 Outbox 和 Celery，在本地模型优先的前提下提供风险识别、上下文管理、长期记忆和可靠异步处理。
+ClariHeart Agent 是一个面向校园心理支持场景的生产化 AI Agent 项目。系统采用 FastAPI、事件驱动多 Agent、分层记忆、混合检索 RAG、事务 Outbox 和 Celery，在本地模型优先的前提下提供风险识别、上下文管理、长期记忆和可靠异步处理。
 
 > 本项目用于工程研究和辅助支持，不替代专业心理咨询、医疗诊断或紧急救援。
 
