@@ -1,21 +1,33 @@
 # ClariHeart Agent
 
-ClariHeart Agent 是一个面向校园心理支持场景的生产化 AI Agent 项目。系统采用 FastAPI、事件驱动多 Agent、分层记忆、混合检索 RAG、事务 Outbox 和 Celery，在本地模型优先的前提下提供风险识别、上下文管理、长期记忆和可靠异步处理。
+> 面向校园心理支持场景的生产级 AI Agent 系统：围绕 Multi-Agent 协作、上下文工程、长期记忆、RAG、模型可靠性与高风险安全边界构建。
+
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
+![Multi-Agent](https://img.shields.io/badge/Architecture-Multi--Agent-6C63FF)
+![RAG](https://img.shields.io/badge/RAG-Hybrid%20Retrieval-0A7BBB)
+![Ollama](https://img.shields.io/badge/LLM-Ollama-000000?logo=ollama&logoColor=white)
+![Celery](https://img.shields.io/badge/Async-Celery-37814A?logo=celery&logoColor=white)
+
+[工程亮点](#30-秒项目速览) · [系统架构](#系统架构) · [快速启动](#快速启动docker-compose) · [测试验收](#测试与工程验收) · [项目边界](#当前边界)
+
+ClariHeart Agent 采用 FastAPI、事件驱动 Multi-Agent、分层记忆、混合检索 RAG、Transactional Outbox 和 Celery，在本地模型优先的前提下提供风险识别、上下文管理、长期记忆与可靠异步处理。项目重点不是封装一次模型调用，而是把 Agent 的协作、状态、恢复、安全和可观测性落实为可测试的工程边界。
 
 > 本项目用于工程研究和辅助支持，不替代专业心理咨询、医疗诊断或紧急救援。
 
-## 核心能力
+## 30 秒项目速览
 
-- 事件驱动多 Agent：Coordinator、Understanding、Safety、Context、Response 通过任务板、共享黑板和 artifact 协作。
-- 生产级 Prompt：显式 Prompt Registry、语义化 ID、SemVer、严格变量校验、输出 Schema 和 release manifest 哈希。
-- 可预算上下文：按目标模型能力估算 token，执行 L0–L3 确定性压缩，并在 Provider 报告超限时执行一次应急压缩。
-- 统一模型网关：Ollama 本地模型优先，提供类型化错误、deadline、有界重试、流恢复、输出续写和受控云降级。
-- 高风险隐私边界：高风险请求在代码策略层禁止云外发；低/中风险云降级也必须同时满足授权、脱敏和 context manifest 校验。
-- 分层记忆：MySQL 保存完整会话和权威摘要，Redis 仅作为短期缓存，长期记忆保存证据、置信度、来源和版本状态。
-- 异步记忆任务：摘要刷新、长期记忆提取和记忆整合通过 Transactional Outbox、RabbitMQ、Celery 执行。
-- 生产级 RAG 摄取：LiteParse、PaddleOCR、Vision 二维路由、Canonical Document JSON、父子块和版本化原子激活。
-- 安全与治理：JWT HttpOnly Cookie、CSRF、Argon2id、角色隔离、工具幂等、限流、死信和隐私保留策略。
-- 可观测性：Agent Trace、模型调用元数据、上下文压缩审计和管理员低基数运行指标。
+| Agent 工程维度 | 项目实现 | 代码证据 |
+|---|---|---|
+| Multi-Agent 编排 | Coordinator、Understanding、Safety、Context、Response 基于任务板、共享黑板与 artifact 协作，安全审查独立于回复生成 | [`app/agents/`](app/agents/) |
+| Prompt / Context Engineering | 显式版本化 Prompt Registry、可信/不可信内容分区、token 预算、L0–L3 压缩和一次性 reactive recovery | [`app/prompts/`](app/prompts/) · [`app/context/`](app/context/) |
+| 长期记忆 | MySQL 权威记录 + Redis 短期缓存；记忆保存证据、版本与冲突状态，并通过 Dream 门控异步整理 | [`long_term_memory.py`](app/services/long_term_memory.py) · [`memory_consolidation.py`](app/services/memory_consolidation.py) |
+| 模型可靠性 | 统一 Gateway 提供类型化错误、deadline、有界重试、流恢复、输出续写和受控云降级 | [`app/llm/`](app/llm/) |
+| RAG 摄取 | LiteParse、PaddleOCR 与 Vision 双路由，Canonical Document JSON、父子块和版本化原子激活 | [`app/rag_ingestion/`](app/rag_ingestion/) |
+| 安全与治理 | 高风险请求禁止云外发；认证、CSRF、幂等工具、Transactional Outbox、限流与死信共同约束副作用 | [`output_safety.py`](app/services/output_safety.py) · [`app/workers/`](app/workers/) |
+| 工程验证 | 完整 Python 测试 351 项通过、前端测试 9 项通过，并提供离线故障 Harness | [`tests/`](tests/) · [`app/harness/`](app/harness/) |
+
+> 当前分支合并前验证：Python `351 passed, 7 skipped`；前端 `9 passed`。复现命令与测试边界见[测试与工程验收](#测试与工程验收)。
 
 ## 系统架构
 
@@ -553,9 +565,9 @@ python -m app.mcp_tools.server
 - Prompt Registry 能生成 release manifest 并校验显式传入的历史记录，但当前应用启动流程只检查认证配置与数据库迁移状态，没有自动比对一个独立的锁定 manifest 文件。
 - 离线故障 Harness 验证确定性恢复矩阵，不等价于真实网络、真实 Redis 集群或真实模型的容量测试。
 
-## 面试讲述建议
+## 关键工程问题
 
-可以围绕以下四个工程问题展开：
+项目重点解决以下四个 Agent 工程问题：
 
 1. 如何把 Prompt 拼接升级为版本化、可信边界清晰且可审计的上下文系统；
 2. 如何依据模型窗口做确定性压缩，并限制 reactive recovery 的次数；
