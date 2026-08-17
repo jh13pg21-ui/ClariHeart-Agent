@@ -30,8 +30,10 @@ class AgentRunResult:
     steps: list[AgentStep]
     memory_brief: str
     collaboration_events: list[Any] = field(default_factory=list)
-    collaboration_tasks: list[Any] = field(default_factory=list)
     collaboration_artifacts: list[Any] = field(default_factory=list)
+    turn_id: str = ""
+    runtime_name: str = "langgraph"
+    checkpoint_resumed: bool = False
 
     @property
     def requires_report(self) -> bool:

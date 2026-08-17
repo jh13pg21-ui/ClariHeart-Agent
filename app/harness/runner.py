@@ -157,7 +157,6 @@ def configure_environment() -> None:
     os.environ["JWT_SECRET_KEY"] = "mindbridge-harness-jwt-secret-at-least-32-bytes"
     os.environ["AUTH_SECURE_COOKIE"] = "false"
     os.environ["AI_PROVIDER"] = "mock"
-    os.environ["AGENT_FRAMEWORK"] = "event_driven_multi_agent"
     os.environ["KNOWLEDGE_VECTOR_ENABLED"] = "false"
     os.environ["KNOWLEDGE_VECTOR_REQUIRED"] = "false"
     os.environ["ALERT_EMAIL_DELIVERY_MODE"] = "log"
@@ -187,7 +186,7 @@ def build_context() -> HarnessContext:
 
 
 def install_harness_patches() -> None:
-    import app.agents.event_driven_runtime as runtime_module
+    import app.graph.runtime as runtime_module
     import app.agents.harness as harness_module
     import app.services.memory as memory_module
 
@@ -432,7 +431,6 @@ def run_agent_routing_harness(context: HarnessContext) -> dict:
     from app.models.entities import ChatSession, UserAccount
     from app.schemas.dtos import ChatRequest
 
-    context.settings.agent_framework = "event_driven_multi_agent"
     db = context.session()
     observed = []
     try:
@@ -442,20 +440,20 @@ def run_agent_routing_harness(context: HarnessContext) -> dict:
                 "id": "normal-companion",
                 "message": "帮我解释一下 Python list comprehension。",
                 "intent": IntentType.CHAT.value,
-                "must_steps": ["UnderstandingAgent", "SafetyAgent", "ContextAgent", "ResponseAgent", "CoordinatorAgent"],
+                "must_steps": ["UnderstandingAgent", "SafetyAgent", "ContextAgent", "ResponseAgent", "LangGraph"],
             },
             {
                 "id": "consult-counselor",
                 "message": "我最近压力很大，睡不着，白天也很焦虑。",
                 "intent": IntentType.CONSULT.value,
-                "must_steps": ["UnderstandingAgent", "SafetyAgent", "ContextAgent", "ResponseAgent", "CoordinatorAgent"],
+                "must_steps": ["UnderstandingAgent", "SafetyAgent", "ContextAgent", "ResponseAgent", "LangGraph"],
             },
             {
                 "id": "risk-counselor",
                 "message": "我不想活了，觉得撑不下去了。",
                 "intent": IntentType.CONSULT.value,
                 "risk": RiskLevel.HIGH.value,
-                "must_steps": ["UnderstandingAgent", "SafetyAgent", "ContextAgent", "ResponseAgent", "CoordinatorAgent"],
+                "must_steps": ["UnderstandingAgent", "SafetyAgent", "ContextAgent", "ResponseAgent", "LangGraph"],
             },
         ]
         for case in cases:
@@ -718,7 +716,7 @@ def write_report(context: HarnessContext, results: list[CheckResult]) -> dict:
         "environment": {
             "databaseUrl": context.settings.database_url,
             "aiProvider": context.settings.ai_provider,
-            "agentFramework": context.settings.agent_framework,
+            "agentFramework": "langgraph",
             "knowledgeVectorEnabled": context.settings.knowledge_vector_enabled,
         },
         "passed": all(result.passed for result in results),

@@ -198,7 +198,6 @@ CORE_PROMPT_DEFINITIONS = (
         "agents/response.md",
         variables=("mode", "locale"),
     ),
-    PromptDefinition("agent.coordinator", "1.0.0", "agents/coordinator.md"),
 )
 
 TASK_PROMPT_DEFINITIONS = (

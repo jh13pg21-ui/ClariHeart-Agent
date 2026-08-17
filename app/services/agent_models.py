@@ -12,7 +12,6 @@ from app.services.model_trace import ModelTraceSink
 
 
 AGENT_MODEL_ALIASES = {
-    "CoordinatorAgent": "coordinator",
     "UnderstandingAgent": "understanding",
     "SafetyAgent": "safety",
     "ContextAgent": "context",

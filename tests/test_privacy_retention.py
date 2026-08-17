@@ -96,6 +96,8 @@ class PrivacyRetentionTests(unittest.TestCase):
                     risk_level="LOW",
                     original_input="原文",
                     sanitized_input="脱敏原文",
+                    turn_id="expired-langgraph-turn",
+                    runtime_name="langgraph",
                     created_at=old_time,
                 ),
             ]
@@ -113,6 +115,7 @@ class PrivacyRetentionTests(unittest.TestCase):
 
         self.assertEqual(result.messages, 1)
         self.assertEqual(result.summaries, 1)
+        self.assertEqual(result.checkpoint_thread_ids, ("expired-langgraph-turn",))
         self.assertEqual(self.db.query(ConversationMemorySummary).count(), 0)
         self.assertEqual(self.db.get(ChatSession, old.id).title, REDACTED_TITLE)
         self.assertEqual(old.messages[0].content, REDACTED_CONTENT)

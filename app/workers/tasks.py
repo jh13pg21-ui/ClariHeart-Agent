@@ -109,6 +109,21 @@ def purge_expired_private_data() -> dict:
     db: Session = SessionLocal()
     try:
         result = PrivacyRetentionService(db, worker_settings).purge_expired()
+        checkpoints = 0
+        if worker_settings.langgraph_checkpointer.strip().lower() == "postgres":
+            import asyncio
+
+            from app.graph.checkpoint import delete_checkpoint_threads, prune_expired_checkpoints
+
+            async def cleanup_checkpoints() -> int:
+                linked = await delete_checkpoint_threads(
+                    worker_settings,
+                    result.checkpoint_thread_ids,
+                )
+                expired = await prune_expired_checkpoints(worker_settings)
+                return linked + expired
+
+            checkpoints = asyncio.run(cleanup_checkpoints())
         return {
             "status": "SUCCESS",
             "messages": result.messages,
@@ -116,6 +131,7 @@ def purge_expired_private_data() -> dict:
             "reports": result.reports,
             "traces": result.traces,
             "summaries": result.summaries,
+            "checkpoints": checkpoints,
         }
     except Exception:
         db.rollback()

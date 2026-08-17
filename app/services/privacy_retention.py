@@ -19,6 +19,7 @@ class RetentionResult:
     reports: int = 0
     traces: int = 0
     summaries: int = 0
+    checkpoint_thread_ids: tuple[str, ...] = ()
 
 
 class PrivacyRetentionService:
@@ -39,6 +40,7 @@ class PrivacyRetentionService:
             days=max(1, int(getattr(self.settings, "risk_data_retention_days", 1095)))
         )
         reports = traces = messages = sessions = summaries = 0
+        checkpoint_thread_ids: list[str] = []
 
         for report in self.db.query(PsychologicalReport).all():
             cutoff = risk_cutoff if report.risk_level in {"MEDIUM", "HIGH"} else chat_cutoff
@@ -51,6 +53,8 @@ class PrivacyRetentionService:
         for trace in self.db.query(AgentRunTrace).all():
             cutoff = risk_cutoff if trace.risk_level in {"MEDIUM", "HIGH"} else chat_cutoff
             if trace.created_at < cutoff and trace.original_input != REDACTED_CONTENT:
+                if trace.runtime_name == "langgraph" and trace.turn_id:
+                    checkpoint_thread_ids.append(trace.turn_id)
                 trace.original_input = REDACTED_CONTENT
                 trace.sanitized_input = REDACTED_CONTENT
                 trace.memory_brief = ""
@@ -91,4 +95,5 @@ class PrivacyRetentionService:
             reports=reports,
             traces=traces,
             summaries=summaries,
+            checkpoint_thread_ids=tuple(sorted(set(checkpoint_thread_ids))),
         )

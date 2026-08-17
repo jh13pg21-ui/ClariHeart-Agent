@@ -19,6 +19,23 @@ services:
       timeout: 3s
       retries: 30
 
+  checkpoint-postgres:
+    image: postgres:17-alpine
+    profiles: ["langgraph"]
+    environment:
+      POSTGRES_DB: mindbridge_checkpoints
+      POSTGRES_USER: mindbridge_checkpoint
+      POSTGRES_PASSWORD: ${LANGGRAPH_CHECKPOINT_POSTGRES_PASSWORD:-mindbridge-checkpoint}
+    ports:
+      - "15432:5432"
+    volumes:
+      - checkpoint-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mindbridge_checkpoint -d mindbridge_checkpoints"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
   redis:
     image: redis:7.2-alpine
     ports:
@@ -60,6 +77,22 @@ services:
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-migrate-secret-key-at-least-32-bytes}
     restart: "no"
 
+  checkpoint-migrate:
+    build:
+      context: .
+      target: production
+    profiles: ["langgraph"]
+    command: python -m app.cli.langgraph_checkpoint setup
+    depends_on:
+      checkpoint-postgres:
+        condition: service_healthy
+    environment:
+      LANGGRAPH_CHECKPOINTER: postgres
+      LANGGRAPH_CHECKPOINT_DATABASE_URL: postgresql://mindbridge_checkpoint:${LANGGRAPH_CHECKPOINT_POSTGRES_PASSWORD:-mindbridge-checkpoint}@checkpoint-postgres:5432/mindbridge_checkpoints
+      LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:-}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-compose-checkpoint-secret-key-at-least-32-bytes}
+    restart: "no"
+
   app:
     build:
       context: .
@@ -75,7 +108,18 @@ services:
       APP_ENVIRONMENT: ${APP_ENVIRONMENT:-production}
       AUTH_SECURE_COOKIE: ${AUTH_SECURE_COOKIE:-false}
       AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
-      AGENT_FRAMEWORK: ${AGENT_FRAMEWORK:-event_driven_multi_agent}
+      LANGGRAPH_CHECKPOINTER: ${LANGGRAPH_CHECKPOINTER:-disabled}
+      LANGGRAPH_CHECKPOINT_DATABASE_URL: ${LANGGRAPH_CHECKPOINT_DATABASE_URL:-postgresql://mindbridge_checkpoint:${LANGGRAPH_CHECKPOINT_POSTGRES_PASSWORD:-mindbridge-checkpoint}@checkpoint-postgres:5432/mindbridge_checkpoints}
+      LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:-}
+      LANGGRAPH_CHECKPOINT_AUTO_SETUP: ${LANGGRAPH_CHECKPOINT_AUTO_SETUP:-false}
+      LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE: ${LANGGRAPH_CHECKPOINT_POOL_MIN_SIZE:-1}
+      LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE: ${LANGGRAPH_CHECKPOINT_POOL_MAX_SIZE:-10}
+      LANGGRAPH_NODE_TIMEOUT_SECONDS: ${LANGGRAPH_NODE_TIMEOUT_SECONDS:-70}
+      LANGGRAPH_NODE_MAX_ATTEMPTS: ${LANGGRAPH_NODE_MAX_ATTEMPTS:-2}
+      LANGSMITH_TRACING_ENABLED: ${LANGSMITH_TRACING_ENABLED:-false}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-mindbridge}
+      LANGSMITH_ALLOW_CONTENT: ${LANGSMITH_ALLOW_CONTENT:-false}
+      SSE_RESUME_ENABLED: ${SSE_RESUME_ENABLED:-false}
       AI_PROVIDER: ${AI_PROVIDER:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-mindbridge-qwen2.5-7b-ft:latest}
@@ -136,6 +180,10 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
+      LANGGRAPH_CHECKPOINTER: ${LANGGRAPH_CHECKPOINTER:-disabled}
+      LANGGRAPH_CHECKPOINT_DATABASE_URL: ${LANGGRAPH_CHECKPOINT_DATABASE_URL:-postgresql://mindbridge_checkpoint:${LANGGRAPH_CHECKPOINT_POSTGRES_PASSWORD:-mindbridge-checkpoint}@checkpoint-postgres:5432/mindbridge_checkpoints}
+      LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:-}
+      LANGGRAPH_CHECKPOINT_TTL_SECONDS: ${LANGGRAPH_CHECKPOINT_TTL_SECONDS:-604800}
       AI_PROVIDER: ${AI_PROVIDER:-ollama}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-mindbridge-qwen2.5-7b-ft:latest}
@@ -318,6 +366,7 @@ services:
 
 volumes:
   mysql-data:
+  checkpoint-postgres-data:
   redis-data:
   rabbitmq-data:
   paddle-models:

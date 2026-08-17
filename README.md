@@ -11,7 +11,7 @@
 
 [工程亮点](#30-秒项目速览) · [系统架构](#系统架构) · [快速启动](#快速启动docker-compose) · [测试验收](#测试与工程验收) · [项目边界](#当前边界)
 
-ClariHeart Agent 采用 FastAPI、事件驱动 Multi-Agent、分层记忆、混合检索 RAG、Transactional Outbox 和 Celery，在本地模型优先的前提下提供风险识别、上下文管理、长期记忆与可靠异步处理。项目重点不是封装一次模型调用，而是把 Agent 的协作、状态、恢复、安全和可观测性落实为可测试的工程边界。
+ClariHeart Agent 采用 FastAPI、LangGraph StateGraph、分层记忆、混合检索 RAG、Transactional Outbox 和 Celery，在本地模型优先的前提下提供风险识别、上下文管理、长期记忆与可靠异步处理。项目重点不是封装一次模型调用，而是把 Agent 的状态、恢复、安全和可观测性落实为可测试的工程边界。
 
 > 本项目用于工程研究和辅助支持，不替代专业心理咨询、医疗诊断或紧急救援。
 
@@ -19,15 +19,15 @@ ClariHeart Agent 采用 FastAPI、事件驱动 Multi-Agent、分层记忆、混�
 
 | Agent 工程维度 | 项目实现 | 代码证据 |
 |---|---|---|
-| Multi-Agent 编排 | Coordinator、Understanding、Safety、Context、Response 基于任务板、共享黑板与 artifact 协作，安全审查独立于回复生成 | [`app/agents/`](app/agents/) |
+| Agent 编排 | LangGraph StateGraph + Typed State；Understanding、Safety、Context、Response 作为显式节点，安全审查独立于回复生成 | [`app/graph/`](app/graph/) |
 | Prompt / Context Engineering | 显式版本化 Prompt Registry、可信/不可信内容分区、token 预算、L0–L3 压缩和一次性 reactive recovery | [`app/prompts/`](app/prompts/) · [`app/context/`](app/context/) |
 | 长期记忆 | MySQL 权威记录 + Redis 短期缓存；记忆保存证据、版本与冲突状态，并通过 Dream 门控异步整理 | [`long_term_memory.py`](app/services/long_term_memory.py) · [`memory_consolidation.py`](app/services/memory_consolidation.py) |
 | 模型可靠性 | 统一 Gateway 提供类型化错误、deadline、有界重试、流恢复、输出续写和受控云降级 | [`app/llm/`](app/llm/) |
 | RAG 摄取 | LiteParse、PaddleOCR 与 Vision 双路由，Canonical Document JSON、父子块和版本化原子激活 | [`app/rag_ingestion/`](app/rag_ingestion/) |
 | 安全与治理 | 高风险请求禁止云外发；认证、CSRF、幂等工具、Transactional Outbox、限流与死信共同约束副作用 | [`output_safety.py`](app/services/output_safety.py) · [`app/workers/`](app/workers/) |
-| 工程验证 | 完整 Python 测试 351 项通过、前端测试 9 项通过，并提供离线故障 Harness | [`tests/`](tests/) · [`app/harness/`](app/harness/) |
+| 工程验证 | 完整 Python 测试 340 项通过、前端测试 9 项通过，并提供离线故障 Harness | [`tests/`](tests/) · [`app/harness/`](app/harness/) |
 
-> 当前分支合并前验证：Python `351 passed, 7 skipped`；前端 `9 passed`。复现命令与测试边界见[测试与工程验收](#测试与工程验收)。
+> 当前分支验证：Python `340 passed, 7 skipped`（包含真实 PostgreSQL Checkpointer）；前端 `9 passed`。复现命令与测试边界见[测试与工程验收](#测试与工程验收)。
 
 ## 系统架构
 
@@ -41,8 +41,9 @@ FastAPI + JWT/CSRF
 MindBridgeAgentHarness
         |
         v
-Event-driven Agent Runtime
-  Coordinator / Understanding / Safety / Context / Response
+LangGraph Agent Runtime
+  StateGraph / Typed State / Checkpointer
+  Understanding / Safety / Context / Response
         |
         +--> Prompt Registry + Context Planner
         +--> MySQL / Redis Memory
@@ -60,21 +61,21 @@ RabbitMQ -> Celery workers
 
 ## Agent Runtime
 
-每轮对话进入事件驱动协作流程：
+每轮对话进入 LangGraph 工作流：
 
 ```text
-TURN_STARTED
--> CoordinatorAgent 创建任务
+START -> prefetch_memory
 -> UnderstandingAgent 判断 CHAT / CONSULT
 -> SafetyAgent 独立判断 LOW / MEDIUM / HIGH
 -> ContextAgent 按需加载记忆、Skill 和 RAG
 -> ResponseAgent 生成候选回复
 -> SafetyAgent 审查候选回复
--> CoordinatorAgent FINAL_ACCEPTED
+-> finalize 校验候选 ID 与安全审核 ID
+-> END
 -> SSE 流式输出
 ```
 
-每个 Agent task 都有独立超时和重试边界。单个 Agent 失败会产生带错误元数据的保守 artifact，不会直接取消同轮其他任务。中高风险回复必须经过独立安全审查。
+每个 Graph 节点都有独立超时、RetryPolicy 和确定性 fallback。并行节点通过 Typed State reducer 合并；中高风险回复必须经过独立安全审查。
 
 ## Prompt 与上下文管理
 
@@ -354,6 +355,13 @@ PaddleOCR 摄取 worker 建议使用 `requirements-ingestion.txt` 或 `Dockerfil
 完整配置见 `.env.example` 和 `app/core/config.py`。
 
 ```env
+LANGGRAPH_CHECKPOINTER=disabled
+LANGGRAPH_CHECKPOINT_DATABASE_URL=
+LANGGRAPH_AES_KEY=
+LANGGRAPH_CHECKPOINT_TTL_SECONDS=604800
+LANGGRAPH_NODE_TIMEOUT_SECONDS=70
+LANGGRAPH_NODE_MAX_ATTEMPTS=2
+
 AI_PROVIDER=mock
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=mindbridge-qwen2.5-7b-ft:latest
@@ -387,7 +395,23 @@ RAG_OCR_ENABLED=true
 RAG_VISION_ENABLED=true
 ```
 
-`MODEL_GATEWAY_ENABLED`、`RECOVERY_ORCHESTRATOR_ENABLED`、`MEMORY_V2_ENABLED` 和 `MEMORY_V2_SHADOW_MODE` 当前存在于 Settings，作为发布状态声明；现有代码没有用它们切换到旧实现。真正参与运行分支的开关包括 `MODEL_CLOUD_FALLBACK_ENABLED`、`PROMPT_REGISTRY_ENABLED`、`CONTEXT_PLANNER_ENABLED`、`CONTEXT_PLANNER_SHADOW_MODE` 和 `MEMORY_CONSOLIDATION_ENABLED`。
+测试/本地环境可显式使用 `LANGGRAPH_CHECKPOINTER=memory`。生产使用独立 PostgreSQL：
+
+```bash
+# LANGGRAPH_AES_KEY 必须是独立随机的 16/24/32 字节密钥。
+docker compose --profile langgraph up -d checkpoint-postgres
+docker compose --profile langgraph run --rm checkpoint-migrate
+
+# 完成迁移与验证后启动应用。
+LANGGRAPH_CHECKPOINTER=postgres \
+docker compose --profile langgraph up -d app worker-general
+```
+
+生产 Checkpoint 使用 `AsyncPostgresSaver`、连接池、AES-EAX 加密和严格反序列化白名单。完整会话、RAG/长期记忆正文、未审核候选、审核回复和最终正文都使用 Untracked State，不写入 Checkpoint；持久化内容仅包含脱敏输入、流程控制、无正文 Artifact 头和领域事件。首次部署必须运行 `checkpoint-migrate`，过期清理由现有隐私保留任务按照 `LANGGRAPH_CHECKPOINT_TTL_SECONDS` 执行。
+
+LangGraph 通过 `astream(..., version="v2")` 输出 Graph State 与 custom token 事件。SSE 响应包含稳定的 `requestId`、`turnId`、递增 `eventId` 和标准 `id:` 字段；HIGH 风险仍完整缓冲并在独立审核后只发送一条 `message`。
+
+`MODEL_GATEWAY_ENABLED`、`RECOVERY_ORCHESTRATOR_ENABLED`、`MEMORY_V2_ENABLED` 和 `MEMORY_V2_SHADOW_MODE` 当前存在于 Settings，作为发布状态声明。真正参与运行分支的开关包括 `MODEL_CLOUD_FALLBACK_ENABLED`、`PROMPT_REGISTRY_ENABLED`、`CONTEXT_PLANNER_ENABLED`、`CONTEXT_PLANNER_SHADOW_MODE` 和 `MEMORY_CONSOLIDATION_ENABLED`。
 
 Docker Compose 只会把 `docker-compose.yml` 中显式列出的变量传入对应容器；仅在 `.env` 增加一个未映射变量不会自动改变容器内 Settings。
 

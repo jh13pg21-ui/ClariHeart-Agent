@@ -21,10 +21,14 @@ UtcDateTime = Annotated[
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
     sessionId: Optional[str] = None
+    requestId: Optional[str] = Field(default=None, min_length=8, max_length=128)
 
 
 class ChatStreamEvent(BaseModel):
     sessionId: Optional[str] = None
+    requestId: Optional[str] = None
+    turnId: Optional[str] = None
+    eventId: Optional[str] = None
     content: Optional[str] = None
     message: Optional[str] = None
     resetSession: Optional[bool] = None

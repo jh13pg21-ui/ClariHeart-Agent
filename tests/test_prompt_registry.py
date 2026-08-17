@@ -19,7 +19,6 @@ class PromptRegistryTests(unittest.TestCase):
                 "agent.safety",
                 "agent.context",
                 "agent.response",
-                "agent.coordinator",
             }.issubset(set(registry.prompt_ids))
         )
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 import json
+import uuid
 from sqlalchemy.orm import Session
 
 from app.agents.harness import MindBridgeAgentHarness
+from app.agents.harness import turn_id_for
 from app.core.config import Settings
 from app.models.entities import UserAccount
 from app.schemas.dtos import ChatRequest, ChatStreamEvent
@@ -20,6 +22,23 @@ class ChatService:
         self.agent_harness = MindBridgeAgentHarness(db, settings)
 
     async def stream_chat(self, user: UserAccount, request: ChatRequest):
+        request_id = request.requestId or uuid.uuid4().hex
+        request = request.model_copy(update={"requestId": request_id})
+        turn_id = turn_id_for(int(getattr(user, "id", 0) or 0), request_id)
+        event_sequence = 0
+
+        def emit(event: str, data: dict) -> str:
+            nonlocal event_sequence
+            event_sequence += 1
+            event_id = f"{turn_id}:{event_sequence}"
+            enriched = {
+                **data,
+                "requestId": request_id,
+                "turnId": turn_id,
+                "eventId": event_id,
+            }
+            return sse(event, enriched, event_id=event_id)
+
         queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
 
         async def session_sink(session) -> None:
@@ -49,7 +68,7 @@ class ChatService:
                 kind, payload = await queue.get()
                 if kind == "meta":
                     session_id = payload.public_id
-                    yield sse(
+                    yield emit(
                         "meta",
                         ChatStreamEvent(
                             type="meta",
@@ -60,7 +79,7 @@ class ChatService:
                 if kind == "token":
                     token = str(payload)
                     streamed_chunks.append(token)
-                    yield sse(
+                    yield emit(
                         "token",
                         ChatStreamEvent(
                             type="token",
@@ -71,7 +90,7 @@ class ChatService:
                     continue
                 if kind == "error":
                     reset_session = request.sessionId is None or isinstance(payload, ValueError)
-                    yield sse(
+                    yield emit(
                         "error",
                         ChatStreamEvent(
                             type="error",
@@ -85,11 +104,18 @@ class ChatService:
                 text = outcome.response_text
                 risk = RiskLevel(outcome.risk_level or RiskLevel.LOW.value)
                 if risk == RiskLevel.HIGH:
-                    yield self._message_event(outcome.session.public_id, text)
+                    yield emit(
+                        "message",
+                        ChatStreamEvent(
+                            type="message",
+                            sessionId=outcome.session.public_id,
+                            content=text,
+                        ).model_dump(),
+                    )
                 elif streamed_chunks:
                     streamed_text = "".join(streamed_chunks).strip()
                     if streamed_text != text:
-                        yield sse(
+                        yield emit(
                             "replace",
                             ChatStreamEvent(
                                 type="replace",
@@ -99,7 +125,7 @@ class ChatService:
                         )
                 else:
                     async for chunk in self._reviewed_chunks(text):
-                        yield sse(
+                        yield emit(
                             "token",
                             ChatStreamEvent(
                                 type="token",
@@ -114,7 +140,7 @@ class ChatService:
                         text,
                         extract_long_term_memory=risk != RiskLevel.HIGH,
                     )
-                yield sse(
+                yield emit(
                     "done",
                     ChatStreamEvent(
                         type="done",
@@ -135,17 +161,6 @@ class ChatService:
             if delay_ms > 0:
                 await asyncio.sleep(delay_ms / 1000)
 
-    @staticmethod
-    def _message_event(session_id: str, text: str) -> str:
-        return sse(
-            "message",
-            ChatStreamEvent(
-                type="message",
-                sessionId=session_id,
-                content=text,
-            ).model_dump(),
-        )
-
-
-def sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+def sse(event: str, data: dict, *, event_id: str | None = None) -> str:
+    suffix = f"id: {event_id}\n" if event_id else ""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n{suffix}\n"

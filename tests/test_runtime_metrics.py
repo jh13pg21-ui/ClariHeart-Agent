@@ -35,10 +35,14 @@ class RuntimeMetricsTests(unittest.TestCase):
             tokens_after=300,
             actions=[("L2", "history_summary")],
         )
+        metrics.record_graph_node("generate_response", "success", 12.5)
+        metrics.record_runtime_selection("langgraph")
 
         snapshot = metrics.snapshot()
         serialized = str(snapshot)
         self.assertEqual(snapshot["modelCalls"]["total"], 1)
         self.assertEqual(snapshot["context"]["tokensBefore"], 500)
         self.assertEqual(snapshot["context"]["tokensAfter"], 300)
+        self.assertEqual(snapshot["graph"]["generate_response:success"], 1)
+        self.assertEqual(snapshot["runtime"]["langgraph"], 1)
         self.assertNotIn("secret-request-id", serialized)

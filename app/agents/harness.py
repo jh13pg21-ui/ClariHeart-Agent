@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import uuid
+import hashlib
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from sqlalchemy.orm import Session
 
-from app.agents.factory import create_agent_runtime
+from app.graph.runtime import LangGraphAgentRuntime
 from app.agents.result import AgentStep
 from app.core.config import Settings
 from app.core.enums import IntentType, MessageRole, RiskLevel
@@ -50,6 +51,9 @@ class AgentHarnessOutcome:
     report_id: int | None
     tool_plan: AgentToolPlan
     trace_id: int | None
+    request_id: str
+    turn_id: str
+    runtime_name: str
 
 
 class MindBridgeAgentHarness:
@@ -77,14 +81,17 @@ class MindBridgeAgentHarness:
         original_input = request.message.strip()
         model_input = self.privacy.sanitize(original_input)
         session = self._resolve_session(user, request.sessionId, original_input)
+        request_id = request.requestId or uuid.uuid4().hex
+        turn_id = turn_id_for(user.id, request_id)
         if session_sink is not None:
             await session_sink(session)
-        agent_run = await create_agent_runtime(self.db, self.settings).run(
+        agent_run = await LangGraphAgentRuntime(self.db, self.settings).run(
             user,
             session,
             original_input,
             model_input,
             response_token_sink=response_token_sink,
+            turn_id=turn_id,
         )
         risk_level = agent_run.risk_level.value
         try:
@@ -123,6 +130,9 @@ class MindBridgeAgentHarness:
             report_id=report.id if report is not None else None,
             tool_plan=tool_plan,
             trace_id=trace.id,
+            request_id=request_id,
+            turn_id=agent_run.turn_id or turn_id,
+            runtime_name=agent_run.runtime_name,
         )
 
     def save_assistant_message(
@@ -253,3 +263,8 @@ class MindBridgeAgentHarness:
                 payload,
                 f"case.create:{report.id}",
             )
+
+
+def turn_id_for(user_id: int, request_id: str) -> str:
+    value = f"{user_id}:{request_id}".encode("utf-8")
+    return hashlib.sha256(value).hexdigest()[:32]

@@ -4,8 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.agents.factory import agent_framework_status
-from app.agents.event_driven_runtime import EventDrivenAgentRuntimeService
+from app.graph.checkpoint import checkpointer_status
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.security import current_user, require_admin
@@ -70,7 +69,12 @@ def agent_status(user: Annotated[UserAccount, Depends(current_user)]):
     settings = get_settings()
     provider = settings.ai_provider.lower()
     model = settings.ollama_model if provider == "ollama" else settings.openai_model if provider == "openai" else "mock"
-    framework = agent_framework_status(settings)
+    framework = {
+        "requested": "langgraph",
+        "active": "langgraph",
+        "available": ["langgraph"],
+        "fallback": False,
+    }
     return {
         "provider": provider,
         "model": model,
@@ -78,11 +82,10 @@ def agent_status(user: Annotated[UserAccount, Depends(current_user)]):
         "agentFramework": framework,
         "finetunedModel": finetuned_model_status(settings),
         "agents": [
-            {"name": "CoordinatorAgent", "status": "READY", "description": "维护任务板、预算、安全门槛、冲突仲裁和最终采纳"},
-            {"name": "UnderstandingAgent", "status": "READY", "description": "独立理解用户输入，发布 intent artifact"},
-            {"name": "SafetyAgent", "status": "READY", "description": "独立风险评估、SAFETY_OVERRIDE 和候选回复安全审查"},
-            {"name": "ContextAgent", "status": "READY", "description": "独立记忆视图、RAG 检索和 skill 上下文聚合"},
-            {"name": "ResponseAgent", "status": "READY", "description": "根据黑板 artifact 发布候选回复方案"},
+            {"name": "UnderstandingAgent", "status": "READY", "description": "LangGraph 节点：理解用户输入并生成 intent artifact"},
+            {"name": "SafetyAgent", "status": "READY", "description": "LangGraph 节点：风险评估、SAFETY_OVERRIDE 和候选回复安全审查"},
+            {"name": "ContextAgent", "status": "READY", "description": "LangGraph 节点：记忆预取、RAG 检索和 skill 上下文聚合"},
+            {"name": "ResponseAgent", "status": "READY", "description": "LangGraph 节点：根据 Typed State 生成候选回复"},
         ],
         "skills": MindBridgeSkillLibrary.status_items(),
         "runtimeHarness": {
@@ -91,15 +94,15 @@ def agent_status(user: Annotated[UserAccount, Depends(current_user)]):
             "description": "统一管理单轮 Agent run 的输入脱敏、上下文注入、风险报告、工具计划和 trace 输出",
         },
         "loop": {
-            "type": "event-driven-multi-agent",
-            "maxSteps": EventDrivenAgentRuntimeService.max_steps,
-            "scheduler": "claim-based-actor-runtime",
+            "type": "langgraph-state-graph",
+            "maxSteps": 11,
+            "scheduler": "stategraph",
         },
         "collaboration": {
-            "scheduler": "claim-based",
-            "state": "append-only-blackboard",
-            "messageBus": "per-agent inbox over shared mailbox",
-            "fixedWorkflow": False,
+            "scheduler": "langgraph",
+            "state": "typed-agent-state",
+            "messageBus": "graph state",
+            "fixedWorkflow": True,
             "agentIsolation": {
                 "prompt": "per-agent system prompt",
                 "memory": "per-agent private Redis key",
@@ -107,9 +110,10 @@ def agent_status(user: Annotated[UserAccount, Depends(current_user)]):
                 "tools": "per-agent tool permissions",
             },
             "taskRecovery": {
-                "timeoutSeconds": settings.agent_task_timeout_seconds,
-                "maxAttempts": settings.agent_task_max_attempts,
-                "strategy": "failure classification + exponential backoff + task-level fallback artifact",
+                "timeoutSeconds": settings.langgraph_node_timeout_seconds,
+                "maxAttempts": settings.langgraph_node_max_attempts,
+                "strategy": "LangGraph RetryPolicy + conditional fallback",
+                "checkpoint": checkpointer_status(settings),
             },
             "memory": {
                 "shortTerm": "Redis sliding window with MySQL fallback",

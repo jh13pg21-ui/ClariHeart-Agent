@@ -10,6 +10,8 @@ from app.api.routes import router
 from app.core.bootstrap import ensure_database_current
 from app.core.config import get_settings
 from app.core.security import csrf_is_valid
+from app.graph.checkpoint import close_checkpointer, initialize_checkpointer
+from app.graph.tracing import configure_langsmith
 
 
 def create_app(settings=None) -> FastAPI:
@@ -34,7 +36,16 @@ def create_app(settings=None) -> FastAPI:
     @app.on_event("startup")
     def startup() -> None:
         runtime_settings.validate_auth_configuration()
+        configure_langsmith(runtime_settings)
         ensure_database_current(runtime_settings)
+
+    @app.on_event("startup")
+    async def startup_langgraph_checkpointer() -> None:
+        await initialize_checkpointer(runtime_settings)
+
+    @app.on_event("shutdown")
+    async def shutdown_langgraph_checkpointer() -> None:
+        await close_checkpointer()
 
     app.include_router(auth_router)
     app.include_router(router)

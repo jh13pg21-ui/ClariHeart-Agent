@@ -426,6 +426,8 @@ class AgentRunTrace(Base):
     response_messages_json: Mapped[str] = mapped_column(Text, default="[]")
     assessment_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    turn_id: Mapped[str] = mapped_column(String(64), default="", server_default="", index=True)
+    runtime_name: Mapped[str] = mapped_column(String(32), default="langgraph", server_default="langgraph", index=True)
 
 
 class ContextCompactionRecord(Base):

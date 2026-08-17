@@ -20,6 +20,8 @@ class RuntimeMetrics:
         "context_tokens": ("provider", "model", "stage"),
         "compaction": ("layer", "reason"),
         "memory": ("operation", "status"),
+        "graph_nodes": ("node", "status"),
+        "runtime_selection": ("runtime",),
     }
 
     def __init__(self) -> None:
@@ -61,6 +63,25 @@ class RuntimeMetrics:
             self._LABELS["memory"],
             registry=self.registry,
         )
+        self.graph_nodes = Counter(
+            "mindbridge_graph_node_runs_total",
+            "LangGraph 节点执行终态",
+            self._LABELS["graph_nodes"],
+            registry=self.registry,
+        )
+        self.graph_node_latency = Histogram(
+            "mindbridge_graph_node_latency_ms",
+            "LangGraph 节点执行延迟毫秒",
+            ("node", "status"),
+            buckets=(1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000),
+            registry=self.registry,
+        )
+        self.runtime_selection = Counter(
+            "mindbridge_agent_runtime_selection_total",
+            "Agent Runtime 灰度选择数量",
+            self._LABELS["runtime_selection"],
+            registry=self.registry,
+        )
         self.latency = Histogram(
             "mindbridge_model_latency_ms",
             "模型终态延迟毫秒",
@@ -73,6 +94,8 @@ class RuntimeMetrics:
         self._tokens = ValueCounter()
         self._context = ValueCounter()
         self._memory = ValueCounter()
+        self._graph = ValueCounter()
+        self._runtime = ValueCounter()
         self._latencies: deque[float] = deque(maxlen=2000)
 
     @classmethod
@@ -148,6 +171,21 @@ class RuntimeMetrics:
         with self._lock:
             self._memory[f"{safe_operation}:{safe_status}"] += amount
 
+    def record_graph_node(self, node: str, status: str, latency_ms: float) -> None:
+        safe_node = self._label(node or "unknown", 64)
+        safe_status = self._label(status or "unknown", 32)
+        safe_latency = max(0.0, float(latency_ms or 0.0))
+        self.graph_nodes.labels(safe_node, safe_status).inc()
+        self.graph_node_latency.labels(safe_node, safe_status).observe(safe_latency)
+        with self._lock:
+            self._graph[f"{safe_node}:{safe_status}"] += 1
+
+    def record_runtime_selection(self, runtime: str) -> None:
+        safe_runtime = self._label(runtime or "unknown", 32)
+        self.runtime_selection.labels(safe_runtime).inc()
+        with self._lock:
+            self._runtime[safe_runtime] += 1
+
     def snapshot(self) -> dict:
         with self._lock:
             latencies = sorted(self._latencies)
@@ -162,6 +200,8 @@ class RuntimeMetrics:
                 },
                 "context": dict(self._context),
                 "memory": dict(self._memory),
+                "graph": dict(self._graph),
+                "runtime": dict(self._runtime),
             }
 
     @staticmethod

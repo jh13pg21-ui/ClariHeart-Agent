@@ -12,20 +12,24 @@ class Settings(BaseSettings):
     refresh_token_days: int = 7
     auth_secure_cookie: bool = True
     auth_cookie_samesite: str = "lax"
-    agent_framework: str = "event_driven_multi_agent"
-    agent_max_rounds: int = 8
-    agent_max_claims_per_round: int = 4
-    agent_max_claims_per_agent: int = 3
-    agent_final_acceptance_min_confidence: float = 0.6
-    agent_task_timeout_seconds: float = 70.0
-    agent_task_max_attempts: int = 2
-    agent_retry_base_seconds: float = 0.2
-    agent_retry_max_seconds: float = 2.0
-    agent_retry_jitter_ratio: float = 0.25
+    langgraph_retry_base_seconds: float = 0.2
+    langgraph_retry_max_seconds: float = 2.0
+    langgraph_retry_jitter_ratio: float = 0.25
+    langgraph_checkpointer: str = "disabled"
+    langgraph_checkpoint_database_url: str = ""
+    langgraph_aes_key: str = ""
+    langgraph_checkpoint_auto_setup: bool = False
+    langgraph_checkpoint_pool_min_size: int = 1
+    langgraph_checkpoint_pool_max_size: int = 10
+    langgraph_checkpoint_ttl_seconds: int | None = 604800
+    langgraph_node_timeout_seconds: float = 70.0
+    langgraph_node_max_attempts: int = 2
+    langsmith_tracing_enabled: bool = False
+    langsmith_project: str = "mindbridge"
+    langsmith_allow_content: bool = False
+    sse_resume_enabled: bool = False
     agent_model_default_provider: str = ""
     agent_model_default_model: str = ""
-    agent_model_coordinator_provider: str = ""
-    agent_model_coordinator_model: str = ""
     agent_model_understanding_provider: str = ""
     agent_model_understanding_model: str = ""
     agent_model_safety_provider: str = ""
@@ -207,6 +211,11 @@ class Settings(BaseSettings):
             from app.services.data_protection import SensitiveTextProtector
 
             SensitiveTextProtector(self)
+        if self.langgraph_checkpointer.strip().lower() == "postgres":
+            if not self.langgraph_checkpoint_database_url:
+                raise ValueError("生产 LangGraph Checkpointer 必须配置 LANGGRAPH_CHECKPOINT_DATABASE_URL")
+            if len(self.langgraph_aes_key.encode("utf-8")) not in {16, 24, 32}:
+                raise ValueError("LANGGRAPH_AES_KEY 必须为 16、24 或 32 字节")
 
 
 @lru_cache

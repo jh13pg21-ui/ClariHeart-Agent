@@ -85,6 +85,10 @@ class ChatDeliveryPolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(names.count("token"), 1)
         self.assertEqual(names[-1], "done")
         self.assertEqual(harness.saved, ["已经审核通过的回复文本，可以安全发送。"])
+        event_ids = [payload["eventId"] for _, payload in events]
+        self.assertEqual(len(event_ids), len(set(event_ids)))
+        self.assertTrue(all(payload["requestId"] for _, payload in events))
+        self.assertTrue(all(payload["turnId"] for _, payload in events))
 
     async def test_low_risk_forwards_runtime_stream_chunks_without_post_generation_split(self):
         chunks = ["原生", "模型", "流"]

@@ -44,6 +44,8 @@ class AgentTraceService:
             user_id=user.id,
             session_id=session.id,
             report_id=report_id,
+            turn_id=agent_run.turn_id,
+            runtime_name=agent_run.runtime_name,
             intent=agent_run.intent.value,
             risk_level=agent_run.risk_level.value,
             original_input=self.protector.protect(raw_value),
@@ -77,7 +79,7 @@ def _agent_steps_with_collaboration(agent_run: AgentRunResult) -> list[Any]:
             "kind": "agent_event",
             "type": getattr(event.type, "value", event.type),
             "actor": event.actor,
-            "taskId": event.task_id,
+            "nodeName": event.node_name,
             "artifactId": event.artifact_id,
             "message": event.message,
             "metadata": event.metadata,
@@ -86,26 +88,12 @@ def _agent_steps_with_collaboration(agent_run: AgentRunResult) -> list[Any]:
     )
     entries.extend(
         {
-            "kind": "agent_task",
-            "id": task.id,
-            "title": task.title,
-            "status": getattr(task.status, "value", task.status),
-            "priority": getattr(task.priority, "value", task.priority),
-            "requiredCapabilities": sorted(task.required_capabilities),
-            "claimedBy": list(task.claimed_by),
-            "createdBy": task.created_by,
-            "metadata": task.metadata,
-        }
-        for task in agent_run.collaboration_tasks
-    )
-    entries.extend(
-        {
             "kind": "agent_artifact",
             "id": artifact.id,
             "owner": artifact.owner,
             "artifactKind": artifact.kind,
             "confidence": artifact.confidence,
-            "taskId": artifact.task_id,
+            "nodeName": artifact.node_name,
             "metadata": artifact.metadata,
             "payload": artifact.payload,
         }
